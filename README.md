@@ -2,7 +2,8 @@
 1. Let BloodMoney(2006) support utf8 words without changing TEX files.
 2. Add subtitles to Briefing, Dialogue, Oneliners, Walkie and TvRadio.
 3. Add minimap, trespassing and Warning on screen display.
-4. 2. A simple LOC translator support Hitman 2~4(Glacier1).
+4. A simple LOC translator support Hitman 2~4(Glacier1).
+-------------------------------------------------------------
 How to do:
 1. Unzip loc files from gen 2~4 Hitman games(2=73; 3=33; 4=54)
 2. Translate the loc file.
