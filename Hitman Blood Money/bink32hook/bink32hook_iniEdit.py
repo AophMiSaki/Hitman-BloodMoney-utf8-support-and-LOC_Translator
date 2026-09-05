@@ -22,16 +22,25 @@ build_slot_tab()）；語系字串抽到lang/<code>.json，預設zh-Hant，檔�
 import ctypes
 import ctypes.wintypes
 import json
+import sys
 from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox
 
-INI_PATH = Path(__file__).resolve().parent / "bink32hook.ini"
+# 錯誤修正：打包成單一exe（PyInstaller onefile）執行時__file__指向TEMP底下的
+# 解壓暫存目錄，不是exe實際位置，導致ini/lang/minimaptest.png全部被找到TEMP去；
+# frozen狀態改用sys.executable（永遠是exe真實路徑）取代__file__。
+if getattr(sys, "frozen", False):
+    _BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    _BASE_DIR = Path(__file__).resolve().parent
+
+INI_PATH = _BASE_DIR / "bink32hook.ini"
 
 # ── 0. 語系（UI 字串抽到 lang/<code>.json，目前只做 zh-Hant）────────────────
 
-LANG_DIR = Path(__file__).resolve().parent / "lang"
+LANG_DIR = _BASE_DIR / "lang"
 DEFAULT_LANG = "zh-Hant"
 
 # 內建預設語系（繁體中文）。lang/<code>.json 不存在時用這份產生一份；存在時
@@ -974,7 +983,7 @@ def build_options_tab(parent: ttk.Frame) -> dict:
 LAYOUT_PREVIEW_W = 1024
 LAYOUT_PREVIEW_H = 768
 LAYOUT_PREVIEW_REF_W = 1024  # MinimapSize換算預覽框像素用的參考寬度
-MINIMAP_SAMPLE_PATH = Path(__file__).resolve().parent / "minimaptest.png"
+MINIMAP_SAMPLE_PATH = _BASE_DIR / "minimaptest.png"
 MINIMAP_ZOOM_BASELINE = 4000
 
 _minimap_sample_cache: dict = {"photo": None, "tried": False}
