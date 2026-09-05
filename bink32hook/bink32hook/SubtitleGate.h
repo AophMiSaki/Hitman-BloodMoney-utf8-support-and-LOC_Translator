@@ -58,6 +58,10 @@ namespace SubtitleGate
     // 實機交叉確認，[Debug] DebugSubtitleDiagEnable 開啟時會印轉換供比對。
     bool IsPlayerControlsLocked();
 
+    // 查LocHook記錄的GetText category是否為Outro／M11_Escape結尾過場，命中
+    // 視為過場封鎖。
+    bool IsKnownEndingCutsceneActive();
+
     // ---- NPC/玩家距離過濾 helper（sub_6AACA0 / sub_6A4240 detour 共用）----
     //
     // ResolveActorHandle 包 native sub_4E5BE0（唯讀 handle table 解析，無

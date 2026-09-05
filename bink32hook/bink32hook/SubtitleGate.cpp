@@ -476,6 +476,21 @@ namespace SubtitleGate
         return locked;
     }
 
+    static bool g_diagLastEndingCutscene = false;
+
+    bool IsKnownEndingCutsceneActive()
+    {
+        bool active = LocHook::IsEndingCutsceneCategoryActive();
+
+        if (g_diagEnable && active != g_diagLastEndingCutscene)
+        {
+            Log::Write("[SubtitleGate] 已知結尾過場動畫（Outro/M11_Escape）：%s", active ? "命中" : "結束");
+            g_diagLastEndingCutscene = active;
+        }
+
+        return active;
+    }
+
     bool DiagEnabled()          { return g_diagEnable; }
     bool NpcRadiusFilterEnabled() { return g_npcHearRadiusEnabled; }
     float NpcHearRadiusSq()      { return g_npcHearRadiusSq; }

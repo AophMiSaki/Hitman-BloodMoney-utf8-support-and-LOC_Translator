@@ -59,4 +59,8 @@ namespace LocHook
     // resId 對回 LOC key。見 字幕功能.md §3.4。out 進來會先被清空；載入失敗
     // 時 out 留空（呼叫端據此判斷本場景無 TV/Radio 字幕）。
     void CollectTvRadioSndOffsets(std::map<DWORD, std::string>& out);
+
+    // 供SubtitleGate.cpp查詢：最近一次GetText的category是否為Outro／
+    // M11_Escape這兩個結尾過場。
+    bool IsEndingCutsceneCategoryActive();
 }

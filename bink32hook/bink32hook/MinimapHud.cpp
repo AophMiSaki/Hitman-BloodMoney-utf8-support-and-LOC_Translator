@@ -1105,9 +1105,9 @@ namespace MinimapHud
 
         if (g_sizeMul <= 0) return false;
 
-        // 過場動畫（腳本序列字幕驅動中，或純運鏡無對白靠 actor+0x746 操作鎖
-        // 補漏）→ 整個小地圖（含外框）不畫。沿用 SubtitleGate 的兩條 gate。
-        if (SubtitleGate::IsScriptedSubtitleBlocking() || SubtitleGate::IsPlayerControlsLocked()) return false;
+        // 過場動畫中（含 Outro／M11_Escape 結尾過場）→ 整個小地圖不畫。
+        if (SubtitleGate::IsScriptedSubtitleBlocking() || SubtitleGate::IsPlayerControlsLocked() ||
+            SubtitleGate::IsKnownEndingCutsceneActive()) return false;
 
         // ESC 暫停選單 / 原生地圖畫面開啟中 → 不畫。
         DWORD ctrl       = *(DWORD*)kLevelCtrlSingletonPtr;

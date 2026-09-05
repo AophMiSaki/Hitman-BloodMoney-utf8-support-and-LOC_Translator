@@ -430,8 +430,33 @@ namespace LocHook
     // 不影響查表邏輯——category單獨無法鎖定呼叫端（"AllLevels/Interface"就有
     // 63個呼叫端共用，見GetTextDetour前方Path A/B/C註解），需要return address
     // 才能從log反查是哪個函式傳了空key進來miss。
+    // 記錄 category 是否為 Outro／M11_Escape，供 SubtitleGate 查詢是否在這兩段
+    // 結尾過場中。
+    static ULONGLONG g_lastOutroHitMs = 0;
+    static ULONGLONG g_lastEscapeHitMs = 0;
+    static const DWORD kEndingCutsceneHoldMs = 1000;
+
+    static bool CategoryMatches(const char* category, const char* name)
+    {
+        if (!category) return false;
+        while (*category == '/') category++;
+        size_t nameLen = strlen(name);
+        if (_strnicmp(category, name, nameLen) != 0) return false;
+        return category[nameLen] == '\0' || category[nameLen] == '/';
+    }
+
+    bool IsEndingCutsceneCategoryActive()
+    {
+        ULONGLONG now = GetTickCount64();
+        return (now - g_lastOutroHitMs < kEndingCutsceneHoldMs) || (now - g_lastEscapeHitMs < kEndingCutsceneHoldMs);
+    }
+
     static const char* __cdecl LookupText(const char* category, const char* key, DWORD retAddr)
     {
+        ULONGLONG nowMs = GetTickCount64();
+        if (CategoryMatches(category, "Outro")) g_lastOutroHitMs = nowMs;
+        if (CategoryMatches(category, "M11_Escape")) g_lastEscapeHitMs = nowMs;
+
         // ═══ SIDE-RECORD-13（debug側錄，受 [Debug] g_diagEnable 控制）═══
         // detour進入點：印 retAddr／category／key指標值／key前16 byte十六進位／
         // key strlen（re-query那筆的strlen是合成字串的byte長度，用來評估

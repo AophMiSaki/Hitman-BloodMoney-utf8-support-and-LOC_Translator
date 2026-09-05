@@ -68,7 +68,8 @@ namespace TrespassHud
         // 過場動畫／腳本序列字幕進行中（SubtitleGate m_OSD+0x69），或純運鏡
         // 無對白靠 actor+0x746 操作鎖補漏 → 整個擅闖提示不畫，讓位給過場
         // 畫面。比照 MinimapHud::Tick()。
-        if (SubtitleGate::IsScriptedSubtitleBlocking() || SubtitleGate::IsPlayerControlsLocked())
+        if (SubtitleGate::IsScriptedSubtitleBlocking() || SubtitleGate::IsPlayerControlsLocked() ||
+            SubtitleGate::IsKnownEndingCutsceneActive())
         {
             g_level = WARN_NONE;
             return false;
