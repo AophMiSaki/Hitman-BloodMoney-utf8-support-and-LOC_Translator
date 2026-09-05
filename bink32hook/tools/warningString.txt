@@ -1,0 +1,18 @@
+[
+  "TRESPASSING" [
+    "orig" = "Trespassing"
+    "trans" = "擅闖"
+  ]
+  "HOSTILE" [
+    "orig" = "Hostile Area"
+    "trans" = "敵對區域"
+  ]
+  "SUSPICIOUS" [
+    "orig" = "GUARDS SUSPICIOUS"
+    "trans" = "懷疑"
+  ]
+  "ALERTED" [
+    "orig" = "GUARDS ALERTED"
+    "trans" = "戰鬥"
+  ]
+]

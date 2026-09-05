@@ -1,0 +1,11 @@
+LIBRARY binkw32
+EXPORTS
+    _BinkOpen@8             = binkw32_real._BinkOpen@8
+    _BinkClose@4             = binkw32_real._BinkClose@4
+    _BinkDoFrame@4           = binkw32_real._BinkDoFrame@4
+    _BinkNextFrame@4         = binkw32_real._BinkNextFrame@4
+    _BinkWait@4              = binkw32_real._BinkWait@4
+    _BinkCopyToBuffer@28     = binkw32_real._BinkCopyToBuffer@28
+    _BinkSetSoundSystem@8    = binkw32_real._BinkSetSoundSystem@8
+    _BinkOpenDirectSound@4   = binkw32_real._BinkOpenDirectSound@4
+    _BinkSetVolume@12        = binkw32_real._BinkSetVolume@12
