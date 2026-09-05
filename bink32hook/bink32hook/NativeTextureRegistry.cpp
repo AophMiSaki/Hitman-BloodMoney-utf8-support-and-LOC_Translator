@@ -36,6 +36,14 @@ namespace NativeTextureRegistry
     static const DWORD kOffset_TM_DecodeBitmapPtr = 0x14;
     static const DWORD kOffset_TM_AllocateSlot    = 0x18;  // sub_48F560，見頂部註解
 
+    // textureDef(GetTexture回傳的68 bytes/筆記錄)+0x2C = DecodeBitmapPtr內部
+    // 呼叫native CreateTexture後存放的實際材質指標；CreateTexture失敗時
+    // native端毫無防呆、直接把NULL存進這裡，nativeIndex仍會被判定登記成功。
+    // 之後native某個維護函式(sub_48F590)會無條件對這欄位讀vtable，讀到NULL
+    // 就0xC0000005 crash（見md\NULL材質指標崩潰.md）。DecodeBitmapPtr呼叫完
+    // 後必須檢查此欄位，NULL就當本次登記失敗、下一幀重試。
+    static const DWORD kOffset_TexDef_NativeTexturePtr = 0x2C;
+
     static const DWORD kVA_ZBitmapCtor = 0x0043F9F0;
     static const DWORD kVA_ZBitmapDtor = 0x0043DAC0;
     // DecodeBitmapPtr內部的sub_48F330會無條件對bitmapObj vtable+0x4(GetName)
@@ -194,6 +202,21 @@ namespace NativeTextureRegistry
 
             ZBitmapDtorFn dtor = (ZBitmapDtorFn)kVA_ZBitmapDtor;
             dtor(bitmapStorage, nullptr);
+
+            // 錯誤修正：DecodeBitmapPtr內部native CreateTexture失敗時不會有
+            // 任何回報，textureDef+0x2C會殘留NULL；不擋住的話nativeIndex會
+            // 被當成登記成功，之後native讀這個NULL材質指標會crash。
+            DWORD nativeTexturePtr = *(DWORD*)((BYTE*)textureDef + kOffset_TexDef_NativeTexturePtr);
+            if (!nativeTexturePtr)
+            {
+                if (s.failLogCount < 5)
+                {
+                    s.failLogCount++;
+                    Log::Write("[NativeTextureRegistry] DecodeBitmapPtr失敗(#%lu)：index=%d textureDef+0x2C仍為NULL（native CreateTexture失敗），本次不登記，下一幀重試",
+                               s.failLogCount, index);
+                }
+                return;
+            }
 
             s.nativeIndex = index;
             s.pushedGeneration = GlyphAtlas::GetGeneration(category);  // DecodeBitmapPtr剛把目前內容寫進去了
