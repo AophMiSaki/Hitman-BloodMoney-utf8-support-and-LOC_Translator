@@ -4,6 +4,9 @@
 3. Add minimap, trespassing and Warning on screen display.
 4. A simple LOC translator support Hitman 2~4(Glacier1).
 -------------------------------------------------------------
+for loc translator
+https://archive.org/details/hbmprmloctool 
+-------------------------------------------------------------
 How to do:
 1. Unzip loc files from gen 2~4 Hitman games(2=73; 3=33; 4=54)
 2. Translate the loc file.
