@@ -131,6 +131,20 @@ namespace NativeTextureRegistry
             out[i] = ((DWORD)src[i] << 24) | 0x00FFFFFFu;
     }
 
+    // 檢查已登記的 native 頁是否還活著。換場景清場不一定經過 TextureManagerReleaseHook
+    // 掛的 sub_48F190，材質記錄可能已被清成 NULL 但 s.nativeIndex 仍是舊值，之後對它
+    // 呼叫 UpdateTexture 會踩到 native NULL 材質指標 crash（見 md\NULL材質指標崩潰.md）。
+    static bool IsRegisteredSlotAlive(void* tmInstance, DWORD* tmVtable, int nativeIndex)
+    {
+        if (nativeIndex <= 0) return false;
+
+        GetTextureFn getTexture = (GetTextureFn)tmVtable[kOffset_TM_GetTexture / 4];
+        void* textureDef = getTexture(tmInstance, nullptr, (unsigned int)nativeIndex, 0);
+        if (!textureDef) return false;
+
+        return *(DWORD*)((BYTE*)textureDef + kOffset_TexDef_NativeTexturePtr) != 0;
+    }
+
     // 真正呼叫native的重量級函式。
     // category必須是General或Newspaper（字幕不經過這條路徑）。呼叫端對
     // Newspaper要先檢查GlyphAtlas::IsCategoryReady()，還沒被實際觸發過時
@@ -222,6 +236,22 @@ namespace NativeTextureRegistry
             s.pushedGeneration = GlyphAtlas::GetGeneration(category);  // DecodeBitmapPtr剛把目前內容寫進去了
             Log::Write("[NativeTextureRegistry] 登記成功[%s]：%dx%d -> 頁碼index=%d（AllocateSlot+DecodeBitmapPtr，未經ReserveTexture wrapper）",
                        NativeBitmapName(category), width, height, index);
+            return;
+        }
+
+        // 失效就退回未登記狀態，下一幀由 if (s.nativeIndex < 0) 分支重新登記，
+        // 不拿失效的 nativeIndex 去呼叫 UpdateTexture。
+        if (!IsRegisteredSlotAlive(tmInstance, tmVtable, s.nativeIndex))
+        {
+            if (s.failLogCount < 5)
+            {
+                s.failLogCount++;
+                Log::Write("[NativeTextureRegistry] 已登記頁失效(#%lu)：index=%d 的 native 材質+0x2C 為 NULL（場景切換清場未經 ReleaseTextures），退回未登記、下一幀重登記",
+                           s.failLogCount, s.nativeIndex);
+            }
+            s.nativeIndex = -1;
+            s.pushedGeneration = 0xFFFFFFFFu;
+            GlyphHook::InvalidateSynthCache();
             return;
         }
 

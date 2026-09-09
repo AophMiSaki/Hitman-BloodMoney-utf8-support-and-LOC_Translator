@@ -110,6 +110,9 @@ namespace MinimapHud
         return *(DWORD*)(ctrl + kActorOffset) != 0;
     }
 
+    // SafeProbeFilter 本體在下方 SEH 工具區；前置宣告供 PlayerWorldPos 使用。
+    static int SafeProbeFilter(unsigned long code);
+
     static bool PlayerWorldPos(float out[3])
     {
         DWORD ctrl = *(DWORD*)kLevelCtrlSingletonPtr;
@@ -117,7 +120,18 @@ namespace MinimapHud
         DWORD actor = *(DWORD*)(ctrl + kActorOffset);
         if (!actor) return false;
         out[0] = out[1] = out[2] = 0.0f;
-        EntityWorldPos((void*)actor, out);
+        // 錯誤修正：關卡載入途中 actor 指標已非 0、但其 scene-graph 父鏈尚未
+        // 接好，sub_4E68E0 沿父鏈累加座標時會讀到野指標而 AV。SEH 包住：
+        // AV／分頁錯誤 → 當作這一幀取不到座標回 false（呼叫端據此略過選層／
+        // 繪製）；guard page、堆疊溢位仍往上丟（見 SafeProbeFilter）。
+        __try
+        {
+            EntityWorldPos((void*)actor, out);
+        }
+        __except (SafeProbeFilter(GetExceptionCode()))
+        {
+            return false;
+        }
         return true;
     }
 
