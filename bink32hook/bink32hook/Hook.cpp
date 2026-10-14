@@ -5,6 +5,8 @@
 #include "GlyphHook.h"
 #include "ZipPathTrace.h"
 #include "TextureManagerReleaseHook.h"
+#include "GetTextureBoundsFixHook.h"
+#include "AllocateSlotStaleRedirectFixHook.h"
 #include "NativeTextureRegistry.h"
 #include "LocHook.h"
 #include "ToUpperHook.h"
@@ -86,6 +88,18 @@ namespace Hook
         // NormalFontReplace 一起控制。
         if (generalCfg.normalFontReplace) TextureManagerReleaseHook::Install();
         else Log::Write("[Hook] TextureManagerReleaseHook 已由[General] NormalFontReplace=0停用，跳過安裝");
+
+        // native GetTexture(sub_48F140)越界subpage index崩潰修法（根因見
+        // GetTextureBoundsFixHook.h）：native引擎自己的材質載入路徑就會踩到，
+        // 跟我方CJK atlas是否啟用無關，固定安裝、不隨任何開關控制。
+        GetTextureBoundsFixHook::Install();
+
+        // 正本清源版：AllocateSlot(sub_48F560)配置到的slot若殘留上一個占用者
+        // （多子頁貼圖）留下的+0x30，直接在這裡free並清乾淨，讓接手的新貼圖
+        // 從一開始就是乾淨狀態（根因見AllocateSlotStaleRedirectFixHook.h）。
+        // 跟上面GetTextureBoundsFixHook是defense-in-depth關係，不衝突，
+        // 固定安裝、不隨任何開關控制。
+        AllocateSlotStaleRedirectFixHook::Install();
 
         // 只讀設定、不做 D3D9/native 呼叫——真正的 vtable patch 由
         // GlyphHook.cpp 的 EnsureBeginSceneHookInstalled() lazy retry 負責。

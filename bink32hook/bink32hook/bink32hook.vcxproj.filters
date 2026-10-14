@@ -47,6 +47,12 @@
     <ClCompile Include="TextureManagerReleaseHook.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="GetTextureBoundsFixHook.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="AllocateSlotStaleRedirectFixHook.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="LocTxtParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -164,6 +170,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="TextureManagerReleaseHook.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GetTextureBoundsFixHook.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AllocateSlotStaleRedirectFixHook.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="LocTxtParser.h">

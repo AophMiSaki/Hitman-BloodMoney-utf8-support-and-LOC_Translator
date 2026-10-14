@@ -95,6 +95,8 @@
     <ClCompile Include="TextureUpload.cpp" />
     <ClCompile Include="NativeTextureRegistry.cpp" />
     <ClCompile Include="TextureManagerReleaseHook.cpp" />
+    <ClCompile Include="GetTextureBoundsFixHook.cpp" />
+    <ClCompile Include="AllocateSlotStaleRedirectFixHook.cpp" />
     <ClCompile Include="LocTxtParser.cpp" />
     <ClCompile Include="LocHook.cpp" />
     <ClCompile Include="LocScenePath.cpp" />
@@ -136,6 +138,8 @@
     <ClInclude Include="TextureUpload.h" />
     <ClInclude Include="NativeTextureRegistry.h" />
     <ClInclude Include="TextureManagerReleaseHook.h" />
+    <ClInclude Include="GetTextureBoundsFixHook.h" />
+    <ClInclude Include="AllocateSlotStaleRedirectFixHook.h" />
     <ClInclude Include="LocTxtParser.h" />
     <ClInclude Include="LocHook.h" />
     <ClInclude Include="LocScenePath.h" />

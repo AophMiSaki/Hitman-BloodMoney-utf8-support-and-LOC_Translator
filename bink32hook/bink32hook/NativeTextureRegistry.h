@@ -49,4 +49,13 @@ namespace NativeTextureRegistry
     // 下次Hook_BeginScene的Update()看到nativeIndex<0會自動重新走完整的
     // AllocateSlot+DecodeBitmapPtr登記流程。
     void InvalidateAllSlots();
+
+    // 錯誤修正（2026-10-14 02:33）：native ReleaseTextures（載入執行緒）的材質槽迴圈，與
+    // Update()（渲染執行緒）的AllocateSlot→DecodeBitmapPtr登記同時進行時，迴圈會讀到
+    // AllocateSlot寫入的占位值1當成COM指標解參考而閃退。兩個函式用旗標互斥，全程不會無限等待：
+    // BeginReleaseGuard()由ReleaseTextures入口呼叫，設旗標後最多等進行中的登記完成kRegWaitMs；
+    // 回傳true代表本次呼叫取得旗標，呼叫端必須在ReleaseTextures返回時呼叫EndReleaseGuard()。
+    // 旗標超過kReleaseExpireMs未放開視為失效，Update()照常登記。
+    bool BeginReleaseGuard();
+    void EndReleaseGuard();
 }

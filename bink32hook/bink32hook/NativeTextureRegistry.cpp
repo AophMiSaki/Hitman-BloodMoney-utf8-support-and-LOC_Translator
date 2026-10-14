@@ -32,9 +32,27 @@ namespace NativeTextureRegistry
     static const DWORD kOffset_TexManager     = 0x14;  // hWnd+0x14 = m_textureManager
     static const DWORD kOffset_UpdateTexture  = 0x9C;  // hWnd自己的vtable slot
 
-    static const DWORD kOffset_TM_GetTexture      = 0x04;
     static const DWORD kOffset_TM_DecodeBitmapPtr = 0x14;
     static const DWORD kOffset_TM_AllocateSlot    = 0x18;  // sub_48F560，見頂部註解
+
+    // 錯誤修正：候選A，不再呼叫native GetTexture(vtable+0x04/sub_48F140)——
+    // 該函式內建一個int 3除錯中斷點(位址0x48F177)，textureDef+0x30殘留
+    // 非NULL但指向的count==0時，我方固定傳的a3=0就會踩中；沒掛偵錯器時
+    // 這個中斷例外復原不乾淨，暫存器/堆疊被汙染，之後才真正撞進已釋放的
+    // atlas記憶體崩潰。改用反組譯出的定址公式直接算textureDef位址，完全
+    // 不執行到sub_48F140那段程式碼；AllocateSlot保證index落在1..0x7FF，
+    // 用不到sub_48F140對index==0/0x800的sentinel分支。見
+    // md\CJK圖集ZBitmap延遲存取崩潰.md 第五/十一輪鑑識。
+    static const DWORD kTextureDefStride = 0x44;  // 68 bytes/筆
+    static const DWORD kTextureDefBase   = 0x04;  // textureDef = tmInstance + index*68 + 4
+
+    // 錯誤修正：候選B防呆。CleanupBeforeCloseDown(sub_487990)會把
+    // m_textureManager物件delete掉但不清NULL(hWnd+0x14)，留下懸空指標；
+    // Update()每幀都重新讀這個指標、沒有任何有效性驗證，讀到懸空/損毀
+    // 物件的vtable後直接呼叫，EIP就會跳進已釋放記憶體。ZTextureManagerD3D
+    // 全binary只有一份靜態vtable，比對這個已知位址即可辨識懸空/損毀物件。
+    // 見md\CJK圖集ZBitmap延遲存取崩潰.md 第十輪鑑識。
+    static const DWORD kVA_TM_Vtable = 0x00763E3C;
 
     // textureDef(GetTexture回傳的68 bytes/筆記錄)+0x2C = DecodeBitmapPtr內部
     // 呼叫native CreateTexture後存放的實際材質指標；CreateTexture失敗時
@@ -51,6 +69,12 @@ namespace NativeTextureRegistry
     // 不設名稱，故建構後必須呼叫此函式(sub_43DB30)給非NULL名稱，避免
     // strlen(NULL) crash。
     static const DWORD kVA_ZBitmapSetName = 0x0043DB30;
+    // native ReserveTexture(sub_487CE0)在ZBitmapCtor之後、DecodeBitmapPtr之前
+    // 多做一步：ZBitmap.this+0x1C = 剛分配到的slot index（ctor會把這欄位清成0，
+    // 由呼叫端負責填；反組譯sub_487CE0第「v10[7] = v4」行證實）。我們繞過
+    // ReserveTexture、原本完全沒設這個欄位，ZBitmap+0x1C永遠是0（見
+    // md\CJK圖集ZBitmap延遲存取崩潰.md 2026-09-14第二輪鑑識）。
+    static const DWORD kOffset_ZBitmap_OwnerSlotIndex = 0x1C;
     // 已知欄位用到+0x2C(DWORD)為止，總計0x30 bytes；多留一截padding避免
     // 版本差異/對齊誤差踩到未知的trailing欄位。
     static const size_t kZBitmapStorageSize = 0x40;
@@ -58,7 +82,6 @@ namespace NativeTextureRegistry
     // 用__fastcall+未使用的dummy edx參數模擬__thiscall——hWnd/m_textureManager/
     // ZBitmap都是遊戲自己編譯的C++類別（RTTI證實，非COM介面）。
     typedef DWORD (__fastcall* AllocateSlotFn)(void* thisPtr, void* /*unused_edx*/);
-    typedef void* (__fastcall* GetTextureFn)(void* thisPtr, void* /*unused_edx*/, unsigned int index, unsigned int a2);
     typedef void  (__fastcall* DecodeBitmapPtrFn)(void* thisPtr, void* /*unused_edx*/, void* bitmapObjPtr, void* textureDefPtr);
     typedef void  (__fastcall* UpdateTextureFn)(void* thisPtr, void* /*unused_edx*/, int index, void* bitmap);
     typedef void* (__fastcall* ZBitmapCtorFn)(void* thisPtr, void* /*unused_edx*/, const void* buffer,
@@ -107,6 +130,88 @@ namespace NativeTextureRegistry
     // 重設通知、場景中途atlas內容更新完成）。預設關閉。
     static bool g_diagEnable = false;
 
+    // 錯誤修正：ReleaseTextures逾時警告＋BeginScene心跳，不受[Debug]開關限制
+    // （比照失敗log）。用來抓「載入變慢、貼圖消失」這類沒有例外/崩潰、log
+    // 平白卡住的現象：ReleaseTextures命中後若超過kStallWarnThresholdMs仍未
+    // 重新登記成功，代表CJK_Atlas材質槽處於裸露狀態；心跳則確認BeginScene
+    // 當下還有沒有在跑、卡了多久，取代事後只能靠log空白區間反推的推論方式。
+    // 見md\CJK圖集ZBitmap延遲存取崩潰.md 2026-09-14 23:29強制關閉那次分析。
+    static DWORD g_lastReleaseTick = 0;
+    static bool  g_stallWarned = false;
+    static const DWORD kStallWarnThresholdMs = 2000;
+    static DWORD g_lastHeartbeatTick = 0;
+    static const DWORD kHeartbeatIntervalMs = 5000;
+
+    // 錯誤修正（2026-10-14 02:33）：ReleaseTextures迴圈與登記互斥，見.h的BeginReleaseGuard註解。
+    // g_releaseActive：ReleaseTextures進行中；g_registering：正在AllocateSlot→DecodeBitmapPtr
+    // 或UpdateTexture的Update()數量（計數器，BeginScene與DetermineCategory兩條路徑可能同時進入）。
+    static volatile LONG g_releaseActive = 0;
+    static volatile DWORD g_releaseStartTick = 0;
+    static volatile LONG g_registering = 0;
+    static const DWORD kRegWaitMs = 2000;
+    static const DWORD kReleaseExpireMs = 5000;
+
+    static bool IsReleaseActive()
+    {
+        if (!g_releaseActive) return false;
+        return (GetTickCount() - g_releaseStartTick) < kReleaseExpireMs;
+    }
+
+    // 先遞增自己的計數器再檢查對方旗標（載入端是先設旗標再等計數器歸零），兩邊都有完整記憶體屏障，
+    // 不會兩邊同時通過。拿不到就直接放棄，渲染執行緒不會被擋住。
+    struct RegGuard
+    {
+        bool ok;
+        RegGuard() : ok(false)
+        {
+            if (IsReleaseActive()) return;
+            InterlockedIncrement(&g_registering);
+            if (IsReleaseActive())
+            {
+                InterlockedDecrement(&g_registering);
+                return;
+            }
+            ok = true;
+        }
+        ~RegGuard()
+        {
+            if (ok) InterlockedDecrement(&g_registering);
+        }
+    };
+
+    bool BeginReleaseGuard()
+    {
+        LONG prev = InterlockedCompareExchange(&g_releaseActive, 1, 0);
+        if (prev != 0)
+        {
+            // 已有一個ReleaseTextures在進行：未逾時就不重複取得（避免覆蓋返回位址）；逾時視為上一次
+            // 的出口沒有執行，接手旗標。
+            if ((GetTickCount() - g_releaseStartTick) < kReleaseExpireMs) return false;
+            Log::Write("[NativeTextureRegistry] ReleaseTextures旗標已超過%lu ms未放開，視為失效並接手", kReleaseExpireMs);
+        }
+        g_releaseStartTick = GetTickCount();
+
+        DWORD t0 = GetTickCount();
+        while (g_registering > 0)
+        {
+            if (GetTickCount() - t0 >= kRegWaitMs)
+            {
+                Log::Write("[NativeTextureRegistry] ReleaseTextures等待進行中的登記逾時（%lu ms，登記計數=%ld），放行", kRegWaitMs, g_registering);
+                break;
+            }
+            Sleep(1);
+        }
+        DWORD waited = GetTickCount() - t0;
+        if (waited > 0)
+            Log::Write("[NativeTextureRegistry] ReleaseTextures入口等待進行中的登記完成：%lu ms", waited);
+        return true;
+    }
+
+    void EndReleaseGuard()
+    {
+        InterlockedExchange(&g_releaseActive, 0);
+    }
+
     void Install(HMODULE hModule)
     {
         g_diagEnable = Config::LoadDebug(hModule).nativeTexRegDiagEnable;
@@ -134,14 +239,12 @@ namespace NativeTextureRegistry
     // 檢查已登記的 native 頁是否還活著。換場景清場不一定經過 TextureManagerReleaseHook
     // 掛的 sub_48F190，材質記錄可能已被清成 NULL 但 s.nativeIndex 仍是舊值，之後對它
     // 呼叫 UpdateTexture 會踩到 native NULL 材質指標 crash（見 md\NULL材質指標崩潰.md）。
-    static bool IsRegisteredSlotAlive(void* tmInstance, DWORD* tmVtable, int nativeIndex)
+    static bool IsRegisteredSlotAlive(void* tmInstance, int nativeIndex)
     {
         if (nativeIndex <= 0) return false;
 
-        GetTextureFn getTexture = (GetTextureFn)tmVtable[kOffset_TM_GetTexture / 4];
-        void* textureDef = getTexture(tmInstance, nullptr, (unsigned int)nativeIndex, 0);
-        if (!textureDef) return false;
-
+        // 候選A：直接算位址取代呼叫GetTexture，見頂部kTextureDefStride註解。
+        void* textureDef = (BYTE*)tmInstance + (size_t)nativeIndex * kTextureDefStride + kTextureDefBase;
         return *(DWORD*)((BYTE*)textureDef + kOffset_TexDef_NativeTexturePtr) != 0;
     }
 
@@ -162,41 +265,40 @@ namespace NativeTextureRegistry
         void* tmInstance = *(void**)((BYTE*)hWndObj + kOffset_TexManager);
         if (!tmInstance) return;
         DWORD* tmVtable = *(DWORD**)tmInstance;
+        // 錯誤修正：補回顯式NULL check——下面候選B的比對雖然邏輯上已能
+        // 擋掉NULL(0 != 非0的kVA_TM_Vtable)，但編譯器/靜態分析器看不出這層
+        // 推論，會對後面tmVtable[...]解引用報「正在取值NULL指標」警告。
         if (!tmVtable) return;
+        // 候選B：vtable位址跟已知靜態位址不符，視為懸空/損毀物件，本幀
+        // 跳過不使用（不對它呼叫任何native函式，也不嘗試釋放——native
+        // 自己delete過，我方從未持有這塊記憶體的所有權；s.nativeIndex等
+        // 既有登記狀態維持不動，下次讀到有效vtable時IsRegisteredSlotAlive
+        // 會自然判斷是否要重登記，見頂部kVA_TM_Vtable註解）。
+        // 錯誤修正：補上失敗log（不受[Debug]開關限制）——若這個判斷持續
+        // 不通過，先前完全沒有任何log能看出CJK atlas為何卡在未登記狀態。
+        if ((DWORD)tmVtable != kVA_TM_Vtable)
+        {
+            if (s.failLogCount < 5)
+            {
+                s.failLogCount++;
+                Log::Write("[NativeTextureRegistry] tmVtable位址異常(#%lu)：讀到0x%08lX，預期0x%08lX（%s），視為懸空/損毀物件，本幀跳過",
+                           s.failLogCount, (DWORD)tmVtable, kVA_TM_Vtable,
+                           NativeBitmapName(category));
+            }
+            return;
+        }
 
         int width  = GlyphAtlas::GetAtlasWidth();
         int height = GlyphAtlas::GetAtlasHeight();
 
         if (s.nativeIndex < 0)
         {
-            AllocateSlotFn allocateSlot = (AllocateSlotFn)tmVtable[kOffset_TM_AllocateSlot / 4];
-            int index = (int)allocateSlot(tmInstance, nullptr);
+            // 錯誤修正（2026-10-14 02:33）：ReleaseTextures進行中不登記，避免AllocateSlot寫入的占位值1
+            // 被迴圈當成COM指標解參考（見.h的BeginReleaseGuard註解）。
+            if (IsReleaseActive()) return;
 
-            if (index <= 0)
-            {
-                if (s.failLogCount < 5)
-                {
-                    s.failLogCount++;
-                    Log::Write("[NativeTextureRegistry] AllocateSlot失敗(#%lu)：回傳index=%d",
-                               s.failLogCount, index);
-                }
-                return;
-            }
-
-            GetTextureFn getTexture = (GetTextureFn)tmVtable[kOffset_TM_GetTexture / 4];
-            void* textureDef = getTexture(tmInstance, nullptr, (unsigned int)index, 0);
-
-            if (!textureDef)
-            {
-                if (s.failLogCount < 5)
-                {
-                    s.failLogCount++;
-                    Log::Write("[NativeTextureRegistry] GetTexture失敗(#%lu)：index=%d 回傳NULL",
-                               s.failLogCount, index);
-                }
-                return;
-            }
-
+            // 準備ZBitmap（不碰材質槽表）移到AllocateSlot之前，縮短「AllocateSlot寫入占位值1」到
+            // 「DecodeBitmapPtr寫入真正指標」之間的空窗，載入端等待登記的時間跟著縮短。
             ConvertAtlasTo32bpp(s.scratch32bpp, category, width, height);
 
             BYTE bitmapStorage[kZBitmapStorageSize] = {};
@@ -211,16 +313,57 @@ namespace NativeTextureRegistry
                 setName(bitmapStorage, nullptr, NativeBitmapName(category));
             }
 
+            // 跟native ReserveTexture一致：DecodeBitmapPtr用完這個暫時ZBitmap就dtor()，
+            // 不再常駐（此前「常駐+不dtor」的防禦性修法無效，已移除，見
+            // md\CJK圖集ZBitmap延遲存取崩潰.md 2026-09-14第二輪鑑識）。
+            ZBitmapDtorFn dtor = (ZBitmapDtorFn)kVA_ZBitmapDtor;
+
+            // 從這裡開始動材質槽表：RegGuard存活期間ReleaseTextures入口會等到本次登記完成。
+            RegGuard guard;
+            if (!guard.ok)
+            {
+                dtor(bitmapStorage, nullptr);
+                return;
+            }
+
+            // 錯誤修正：C6011誤報（第189行已NULL check過tmVtable，分析器
+            // flow追蹤跨不過中間的if區塊，屬已知false positive），直接
+            // suppress這一行，不影響檔案其他地方的C6011檢查。
+            #pragma warning(suppress : 6011)
+            AllocateSlotFn allocateSlot = (AllocateSlotFn)tmVtable[kOffset_TM_AllocateSlot / 4];
+            int index = (int)allocateSlot(tmInstance, nullptr);
+
+            if (index <= 0)
+            {
+                if (s.failLogCount < 5)
+                {
+                    s.failLogCount++;
+                    Log::Write("[NativeTextureRegistry] AllocateSlot失敗(#%lu)：回傳index=%d",
+                               s.failLogCount, index);
+                }
+                dtor(bitmapStorage, nullptr);
+                return;
+            }
+
+            // 候選A：直接算位址取代呼叫GetTexture，見頂部kTextureDefStride
+            // 註解。純指標運算不會是NULL（index已由AllocateSlot保證>=1），
+            // 不需要再檢查失敗分支。
+            void* textureDef = (BYTE*)tmInstance + (size_t)index * kTextureDefStride + kTextureDefBase;
+
+            // 錯誤修正：補上native ReserveTexture會設、我們原本漏設的ZBitmap+0x1C
+            // 所屬slot index（見頂部kOffset_ZBitmap_OwnerSlotIndex註解）。
+            *(DWORD*)(bitmapStorage + kOffset_ZBitmap_OwnerSlotIndex) = (DWORD)index;
+
             DecodeBitmapPtrFn decodeBitmapPtr = (DecodeBitmapPtrFn)tmVtable[kOffset_TM_DecodeBitmapPtr / 4];
             decodeBitmapPtr(tmInstance, nullptr, bitmapStorage, textureDef);
-
-            ZBitmapDtorFn dtor = (ZBitmapDtorFn)kVA_ZBitmapDtor;
-            dtor(bitmapStorage, nullptr);
 
             // 錯誤修正：DecodeBitmapPtr內部native CreateTexture失敗時不會有
             // 任何回報，textureDef+0x2C會殘留NULL；不擋住的話nativeIndex會
             // 被當成登記成功，之後native讀這個NULL材質指標會crash。
             DWORD nativeTexturePtr = *(DWORD*)((BYTE*)textureDef + kOffset_TexDef_NativeTexturePtr);
+
+            dtor(bitmapStorage, nullptr);
+
             if (!nativeTexturePtr)
             {
                 if (s.failLogCount < 5)
@@ -236,12 +379,25 @@ namespace NativeTextureRegistry
             s.pushedGeneration = GlyphAtlas::GetGeneration(category);  // DecodeBitmapPtr剛把目前內容寫進去了
             Log::Write("[NativeTextureRegistry] 登記成功[%s]：%dx%d -> 頁碼index=%d（AllocateSlot+DecodeBitmapPtr，未經ReserveTexture wrapper）",
                        NativeBitmapName(category), width, height, index);
+            // 錯誤修正：General重新登記成功，解除逾時警告狀態（見頂部
+            // kStallWarnThresholdMs註解）。
+            if (category == FontCategory::General)
+            {
+                g_lastReleaseTick = 0;
+                g_stallWarned = false;
+            }
             return;
         }
 
+        // 錯誤修正（2026-10-14 02:33）：UpdateTexture同樣會動到材質槽，ReleaseTextures進行中不執行；
+        // 登記計數遞增期間ReleaseTextures入口會等待。
+        if (IsReleaseActive()) return;
+        RegGuard updateGuard;
+        if (!updateGuard.ok) return;
+
         // 失效就退回未登記狀態，下一幀由 if (s.nativeIndex < 0) 分支重新登記，
         // 不拿失效的 nativeIndex 去呼叫 UpdateTexture。
-        if (!IsRegisteredSlotAlive(tmInstance, tmVtable, s.nativeIndex))
+        if (!IsRegisteredSlotAlive(tmInstance, s.nativeIndex))
         {
             if (s.failLogCount < 5)
             {
@@ -272,6 +428,9 @@ namespace NativeTextureRegistry
             setName(bitmapStorage, nullptr, NativeBitmapName(category));
         }
 
+        // 錯誤修正：同上，補上ZBitmap+0x1C=所屬slot index。
+        *(DWORD*)(bitmapStorage + kOffset_ZBitmap_OwnerSlotIndex) = (DWORD)s.nativeIndex;
+
         DWORD* hWndVtable = *(DWORD**)hWndObj;
         UpdateTextureFn updateTexture = (UpdateTextureFn)hWndVtable[kOffset_UpdateTexture / 4];
         updateTexture(hWndObj, nullptr, s.nativeIndex, bitmap);
@@ -291,6 +450,28 @@ namespace NativeTextureRegistry
 
     static HRESULT __stdcall Hook_BeginScene(IDirect3DDevice9* device)
     {
+        // 錯誤修正：心跳log，不受[Debug]開關限制——BeginScene若整段時間沒有
+        // 任何log輸出，代表引擎卡在某處還沒跑到下一幀；固定間隔印心跳可以
+        // 直接從log時間間隔看出「卡在哪個時間點、卡了多久」。
+        DWORD now = GetTickCount();
+        if (now - g_lastHeartbeatTick >= kHeartbeatIntervalMs)
+        {
+            g_lastHeartbeatTick = now;
+            Log::Write("[NativeTextureRegistry] Heartbeat：BeginScene存活中 tick=%lu", now);
+        }
+
+        // 錯誤修正：ReleaseTextures命中後若經過kStallWarnThresholdMs仍未重新
+        // 登記成功，代表CJK_Atlas材質槽處於裸露狀態（此刻畫面上CJK字是消失
+        // 的）。只警告一次（g_stallWarned），避免同一次卡住洗版。
+        if (g_lastReleaseTick != 0 && !g_stallWarned &&
+            g_slots[(size_t)FontCategory::General].nativeIndex < 0 &&
+            (now - g_lastReleaseTick) >= kStallWarnThresholdMs)
+        {
+            g_stallWarned = true;
+            Log::Write("[NativeTextureRegistry] WARNING：ReleaseTextures命中後已過%lu ms，CJK_Atlas材質槽仍未重建（nativeIndex=-1），貼圖此刻對玩家而言是消失狀態",
+                       now - g_lastReleaseTick);
+        }
+
         if (g_diagEnable && g_beginSceneHits < 3)
         {
             g_beginSceneHits++;
@@ -397,6 +578,11 @@ namespace NativeTextureRegistry
         }
         if (g_diagEnable)
             Log::Write("[NativeTextureRegistry] InvalidateAllSlots：全部分類nativeIndex重設為-1，下次BeginScene會重新登記");
+
+        // 錯誤修正：記錄清空時間，供Hook_BeginScene判斷是否逾時未重新登記
+        // （見頂部kStallWarnThresholdMs註解）。
+        g_lastReleaseTick = GetTickCount();
+        g_stallWarned = false;
 
         // AllocateSlot重新登記時不保證拿回同一個頁碼（實測1->2過），
         // GlyphHook::g_synthCache裡已合成過的字若不一起清掉，會永遠帶著剛
