@@ -35,6 +35,9 @@
     <ClCompile Include="ZipPathTrace.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="GameAddr.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="TexDispatchHook.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -158,6 +161,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ZipPathTrace.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GameAddr.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AddressTable.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="TexDispatchHook.h">

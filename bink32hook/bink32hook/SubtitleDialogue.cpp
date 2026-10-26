@@ -1,6 +1,7 @@
 #include "SubtitleDialogue.h"
 #include "SubtitleGate.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include <Windows.h>
 #include <cstdio>
 #include <cstdint>
@@ -20,8 +21,8 @@ namespace SubtitleDialogue
     //
     // 0x6AACA0 起 6 bytes（`sub esp,304h` 剛好一條完整指令），5-byte JMP patch
     // 後剩 1 byte 補 NOP，續行點對齊到下一條指令(`push esi`)。
-    static const DWORD kVA_ExtraLineSite = 0x006AACA0;
-    static const DWORD kVA_ExtraLineContinue = 0x006AACA6;
+    static DWORD g_vaExtraLineSite = 0;
+    static DWORD g_vaExtraLineResume = 0;
     static const BYTE kExpectedExtraLine[6] = { 0x81, 0xEC, 0x04, 0x03, 0x00, 0x00 };
 
     static void __cdecl OnExtraLineCall(int a1, const char* a2, int a3, const char* a4, int origResult)
@@ -52,7 +53,7 @@ namespace SubtitleDialogue
         __asm
         {
             sub esp, 304h
-            jmp kVA_ExtraLineContinue
+            jmp dword ptr [g_vaExtraLineResume]
         }
     }
 
@@ -96,13 +97,27 @@ namespace SubtitleDialogue
 
     void Install()
     {
-        BYTE* p = (BYTE*)kVA_ExtraLineSite;
+        g_vaExtraLineSite = GameAddr::Addr(AddressTable::NpcDialogue_Entry);
+        g_vaExtraLineResume = GameAddr::Addr(AddressTable::NpcDialogue_Resume);
+        if (!g_vaExtraLineSite || !g_vaExtraLineResume)
+        {
+            Log::Write("[SubtitleDialogue] 位址查詢失敗（site=0x%08X resume=0x%08X），放棄安裝sub_6AACA0字幕補完hook",
+                       g_vaExtraLineSite, g_vaExtraLineResume);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaExtraLineSite;
+        if (IsBadReadPtr(p, 6))
+        {
+            Log::Write("[SubtitleDialogue] 0x%08X無法讀取，放棄安裝sub_6AACA0字幕補完hook", g_vaExtraLineSite);
+            return;
+        }
         for (int i = 0; i < 6; i++)
         {
             if (p[i] != kExpectedExtraLine[i])
             {
                 Log::Write("[SubtitleDialogue] 0x%08X第%d byte是0x%02X，預期0x%02X"
-                           "——版本不符或已被其他patch動過，放棄安裝sub_6AACA0字幕補完hook", kVA_ExtraLineSite, i, p[i], kExpectedExtraLine[i]);
+                           "——版本不符或已被其他patch動過，放棄安裝sub_6AACA0字幕補完hook", g_vaExtraLineSite, i, p[i], kExpectedExtraLine[i]);
                 return;
             }
         }
@@ -118,6 +133,6 @@ namespace SubtitleDialogue
         Log::Write("[SubtitleDialogue] sub_6AACA0字幕補完hook安裝完成：site=0x%08X detour=%p"
                    "（成功組出LOC key且原函式判定存在時，交給SubtitleGate狀態機決定顯示位置，"
                    "不影響原本語音播放邏輯）",
-                   kVA_ExtraLineSite, &Detour_ExtraLineEntry);
+                   g_vaExtraLineSite, &Detour_ExtraLineEntry);
     }
 }

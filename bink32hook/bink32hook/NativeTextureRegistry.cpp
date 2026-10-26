@@ -2,6 +2,7 @@
 #include "GlyphAtlas.h"
 #include "GlyphHook.h"
 #include "Config.h"
+#include "GameAddr.h"
 #include "Log.h"
 #include <d3d9.h>
 #include <vector>
@@ -19,8 +20,8 @@
 // hWnd vtable+0x9C（sub_487C10，UpdateTexture(index,ZBitmap*)）輕量無 alloca，
 // 用於「atlas 有新 glyph、要更新已登記頁面內容」。
 //
-// kVA_ZBitmapCtor(sub_43F9F0) 是 ZBitmap 建構子，把 buffer 依 mask 轉成 native
-// canonical 格式；kVA_ZBitmapDtor(sub_43DAC0) 對應解構子（釋放內部 buffer）。
+// ZBitmap_Ctor 是 ZBitmap 建構子，把 buffer 依 mask 轉成 native
+// canonical 格式；ZBitmap_Dtor 對應解構子（釋放內部 buffer）。
 // 用法：stack 上構造 -> 傳指標給 texture manager -> 立刻解構。
 //
 // 重量級 native 呼叫只從 IDirect3DDevice9::BeginScene hook 觸發，不從
@@ -28,8 +29,7 @@
 
 namespace NativeTextureRegistry
 {
-    static const DWORD kVA_hWnd = 0x008ACA30;
-    static const DWORD kOffset_TexManager     = 0x14;  // hWnd+0x14 = m_textureManager
+    static const DWORD kOffset_TexManager    = 0x14;  // hWnd+0x14 = m_textureManager
     static const DWORD kOffset_UpdateTexture  = 0x9C;  // hWnd自己的vtable slot
 
     static const DWORD kOffset_TM_DecodeBitmapPtr = 0x14;
@@ -52,7 +52,6 @@ namespace NativeTextureRegistry
     // 物件的vtable後直接呼叫，EIP就會跳進已釋放記憶體。ZTextureManagerD3D
     // 全binary只有一份靜態vtable，比對這個已知位址即可辨識懸空/損毀物件。
     // 見md\CJK圖集ZBitmap延遲存取崩潰.md 第十輪鑑識。
-    static const DWORD kVA_TM_Vtable = 0x00763E3C;
 
     // textureDef(GetTexture回傳的68 bytes/筆記錄)+0x2C = DecodeBitmapPtr內部
     // 呼叫native CreateTexture後存放的實際材質指標；CreateTexture失敗時
@@ -62,13 +61,10 @@ namespace NativeTextureRegistry
     // 後必須檢查此欄位，NULL就當本次登記失敗、下一幀重試。
     static const DWORD kOffset_TexDef_NativeTexturePtr = 0x2C;
 
-    static const DWORD kVA_ZBitmapCtor = 0x0043F9F0;
-    static const DWORD kVA_ZBitmapDtor = 0x0043DAC0;
     // DecodeBitmapPtr內部的sub_48F330會無條件對bitmapObj vtable+0x4(GetName)
     // 的回傳值做strlen、不檢查NULL。ZBitmap ctor只把名稱欄位(this+0x18)歸零、
     // 不設名稱，故建構後必須呼叫此函式(sub_43DB30)給非NULL名稱，避免
     // strlen(NULL) crash。
-    static const DWORD kVA_ZBitmapSetName = 0x0043DB30;
     // native ReserveTexture(sub_487CE0)在ZBitmapCtor之後、DecodeBitmapPtr之前
     // 多做一步：ZBitmap.this+0x1C = 剛分配到的slot index（ctor會把這欄位清成0，
     // 由呼叫端負責填；反組譯sub_487CE0第「v10[7] = v4」行證實）。我們繞過
@@ -220,7 +216,7 @@ namespace NativeTextureRegistry
 
     static void* GetHWndObject()
     {
-        DWORD obj = *(DWORD*)kVA_hWnd;
+        DWORD obj = GameAddr::ReadDword(AddressTable::HWndObjectPtr);
         if (!obj || obj == 0xFFFFFFFF) return nullptr;
         return (void*)obj;
     }
@@ -266,23 +262,40 @@ namespace NativeTextureRegistry
         if (!tmInstance) return;
         DWORD* tmVtable = *(DWORD**)tmInstance;
         // 錯誤修正：補回顯式NULL check——下面候選B的比對雖然邏輯上已能
-        // 擋掉NULL(0 != 非0的kVA_TM_Vtable)，但編譯器/靜態分析器看不出這層
+        // 擋掉NULL(0 != 非0的TextureManagerVtable)，但編譯器/靜態分析器看不出這層
         // 推論，會對後面tmVtable[...]解引用報「正在取值NULL指標」警告。
         if (!tmVtable) return;
         // 候選B：vtable位址跟已知靜態位址不符，視為懸空/損毀物件，本幀
         // 跳過不使用（不對它呼叫任何native函式，也不嘗試釋放——native
         // 自己delete過，我方從未持有這塊記憶體的所有權；s.nativeIndex等
         // 既有登記狀態維持不動，下次讀到有效vtable時IsRegisteredSlotAlive
-        // 會自然判斷是否要重登記，見頂部kVA_TM_Vtable註解）。
+        // 會自然判斷是否要重登記，見頂部TextureManagerVtable註解）。
         // 錯誤修正：補上失敗log（不受[Debug]開關限制）——若這個判斷持續
         // 不通過，先前完全沒有任何log能看出CJK atlas為何卡在未登記狀態。
-        if ((DWORD)tmVtable != kVA_TM_Vtable)
+        const DWORD expectedTmVtable = GameAddr::Addr(AddressTable::TextureManagerVtable);
+        if ((DWORD)tmVtable != expectedTmVtable)
         {
             if (s.failLogCount < 5)
             {
                 s.failLogCount++;
                 Log::Write("[NativeTextureRegistry] tmVtable位址異常(#%lu)：讀到0x%08lX，預期0x%08lX（%s），視為懸空/損毀物件，本幀跳過",
-                           s.failLogCount, (DWORD)tmVtable, kVA_TM_Vtable,
+                           s.failLogCount, (DWORD)tmVtable, expectedTmVtable,
+                           NativeBitmapName(category));
+            }
+            return;
+        }
+
+        // 三個原生函式位址任一查不到（版本不明或表內為0）就不呼叫，避免呼叫空位址。
+        const DWORD vaZBitmapCtor    = GameAddr::Addr(AddressTable::ZBitmap_Ctor);
+        const DWORD vaZBitmapDtor    = GameAddr::Addr(AddressTable::ZBitmap_Dtor);
+        const DWORD vaZBitmapSetName = GameAddr::Addr(AddressTable::ZBitmap_SetName);
+        if (!vaZBitmapCtor || !vaZBitmapDtor || !vaZBitmapSetName)
+        {
+            if (s.failLogCount < 5)
+            {
+                s.failLogCount++;
+                Log::Write("[NativeTextureRegistry] ZBitmap原生函式位址查詢失敗(#%lu)：ctor=0x%08lX dtor=0x%08lX setName=0x%08lX（%s），本幀跳過",
+                           s.failLogCount, vaZBitmapCtor, vaZBitmapDtor, vaZBitmapSetName,
                            NativeBitmapName(category));
             }
             return;
@@ -302,21 +315,21 @@ namespace NativeTextureRegistry
             ConvertAtlasTo32bpp(s.scratch32bpp, category, width, height);
 
             BYTE bitmapStorage[kZBitmapStorageSize] = {};
-            ZBitmapCtorFn ctor = (ZBitmapCtorFn)kVA_ZBitmapCtor;
+            ZBitmapCtorFn ctor = (ZBitmapCtorFn)vaZBitmapCtor;
             ctor(bitmapStorage, nullptr, s.scratch32bpp.data(), (DWORD)width, (DWORD)height,
                  0x00FF0000u, 0x0000FF00u, 0x000000FFu, 0xFF000000u, 0u);
 
             // sub_48F330會對GetName()(vtable+0x4)回傳值做strlen，NULL會crash
-            // （見頂部kVA_ZBitmapSetName註解）——ctor沒設名稱，這裡補上。
+            // （見頂部ZBitmap_SetName註解）——ctor沒設名稱，這裡補上。
             {
-                ZBitmapSetNameFn setName = (ZBitmapSetNameFn)kVA_ZBitmapSetName;
+                ZBitmapSetNameFn setName = (ZBitmapSetNameFn)vaZBitmapSetName;
                 setName(bitmapStorage, nullptr, NativeBitmapName(category));
             }
 
             // 跟native ReserveTexture一致：DecodeBitmapPtr用完這個暫時ZBitmap就dtor()，
             // 不再常駐（此前「常駐+不dtor」的防禦性修法無效，已移除，見
             // md\CJK圖集ZBitmap延遲存取崩潰.md 2026-09-14第二輪鑑識）。
-            ZBitmapDtorFn dtor = (ZBitmapDtorFn)kVA_ZBitmapDtor;
+            ZBitmapDtorFn dtor = (ZBitmapDtorFn)vaZBitmapDtor;
 
             // 從這裡開始動材質槽表：RegGuard存活期間ReleaseTextures入口會等到本次登記完成。
             RegGuard guard;
@@ -417,14 +430,14 @@ namespace NativeTextureRegistry
         ConvertAtlasTo32bpp(s.scratch32bpp, category, width, height);
 
         BYTE bitmapStorage[kZBitmapStorageSize] = {};
-        ZBitmapCtorFn ctor = (ZBitmapCtorFn)kVA_ZBitmapCtor;
+        ZBitmapCtorFn ctor = (ZBitmapCtorFn)vaZBitmapCtor;
         void* bitmap = ctor(bitmapStorage, nullptr, s.scratch32bpp.data(), (DWORD)width, (DWORD)height,
                              0x00FF0000u, 0x0000FF00u, 0x000000FFu, 0xFF000000u, 0u);
 
         // 同樣補SetName，避免UpdateTexture內部鏈萬一也走到GetName()+strlen
         // 重演同一種NULL pointer dereference。
         {
-            ZBitmapSetNameFn setName = (ZBitmapSetNameFn)kVA_ZBitmapSetName;
+            ZBitmapSetNameFn setName = (ZBitmapSetNameFn)vaZBitmapSetName;
             setName(bitmapStorage, nullptr, NativeBitmapName(category));
         }
 
@@ -435,7 +448,7 @@ namespace NativeTextureRegistry
         UpdateTextureFn updateTexture = (UpdateTextureFn)hWndVtable[kOffset_UpdateTexture / 4];
         updateTexture(hWndObj, nullptr, s.nativeIndex, bitmap);
 
-        ZBitmapDtorFn dtor = (ZBitmapDtorFn)kVA_ZBitmapDtor;
+        ZBitmapDtorFn dtor = (ZBitmapDtorFn)vaZBitmapDtor;
         dtor(bitmapStorage, nullptr);
 
         s.pushedGeneration = gen;

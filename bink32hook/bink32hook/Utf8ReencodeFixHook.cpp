@@ -1,15 +1,16 @@
 #include "Utf8ReencodeFixHook.h"
 #include "Log.h"
+#include "GameAddr.h"
 
 namespace Utf8ReencodeFixHook
 {
     // native sub_438FE0：通用codepoint->UTF-8編碼器。a1=輸出buffer(至少
     // 4+1 bytes)，a2=codepoint，回傳寫入的byte數1~4。
     typedef int(__cdecl* EncodeCodepointFn)(BYTE* out, unsigned int codepoint);
-    static const EncodeCodepointFn sub_438FE0 = (EncodeCodepointFn)0x00438FE0;
+    static EncodeCodepointFn sub_438FE0 = nullptr;
 
-    static const DWORD kVA_5A4850 = 0x005A4850;
-    static const BYTE kExpected5A4850[5] = { 0x83,0xEC,0x08, 0x53, 0x55 }; // sub esp,8 / push ebx / push ebp
+    static DWORD g_vaEntry = 0;
+    static const BYTE kExpectedEntry[5] = { 0x83,0xEC,0x08, 0x53, 0x55 }; // sub esp,8 / push ebx / push ebp
 
     static bool IsUtf8Continuation(BYTE b)
     {
@@ -94,13 +95,27 @@ namespace Utf8ReencodeFixHook
 
     void Install()
     {
-        BYTE* p = (BYTE*)kVA_5A4850;
+        g_vaEntry = GameAddr::Addr(AddressTable::LatinToUtf8Copy_Entry);
+        DWORD vaEncode = GameAddr::Addr(AddressTable::EncodeCodepointUtf8);
+        if (!g_vaEntry || !vaEncode)
+        {
+            Log::Write("[Utf8ReencodeFixHook] 位址查詢失敗（entry=0x%08X encode=0x%08X），放棄安裝", g_vaEntry, vaEncode);
+            return;
+        }
+        sub_438FE0 = (EncodeCodepointFn)vaEncode;
+
+        BYTE* p = (BYTE*)g_vaEntry;
+        if (IsBadReadPtr(p, 5))
+        {
+            Log::Write("[Utf8ReencodeFixHook] sub_5A4850 0x%08X無法讀取，放棄安裝", g_vaEntry);
+            return;
+        }
         for (int i = 0; i < 5; i++)
         {
-            if (p[i] != kExpected5A4850[i])
+            if (p[i] != kExpectedEntry[i])
             {
                 Log::Write("[Utf8ReencodeFixHook] sub_5A4850 0x%08X第%d byte是0x%02X，預期0x%02X"
-                           "——版本不符或已被其他patch動過，放棄安裝", kVA_5A4850, i, p[i], kExpected5A4850[i]);
+                           "——版本不符或已被其他patch動過，放棄安裝", g_vaEntry, i, p[i], kExpectedEntry[i]);
                 return;
             }
         }
@@ -113,6 +128,6 @@ namespace Utf8ReencodeFixHook
         FlushInstructionCache(GetCurrentProcess(), p, 5);
 
         Log::Write("[Utf8ReencodeFixHook] sub_5A4850 inline hook安裝完成：site=0x%08X detour=%p",
-                   kVA_5A4850, &Reencode);
+                   g_vaEntry, &Reencode);
     }
 }

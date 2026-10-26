@@ -4,6 +4,7 @@
 #include "GlyphAtlas.h"
 #include "GlyphHook.h"
 #include "ZipPathTrace.h"
+#include "GameAddr.h"
 #include "TextureManagerReleaseHook.h"
 #include "GetTextureBoundsFixHook.h"
 #include "AllocateSlotStaleRedirectFixHook.h"
@@ -56,6 +57,8 @@ namespace Hook
     void Init(HMODULE hModule)
     {
         Log::Write("[Hook] Init 開始");
+
+        GameAddr::Init();
 
         VerifyBinkForwarding();
 

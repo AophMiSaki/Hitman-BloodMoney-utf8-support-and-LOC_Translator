@@ -1,5 +1,6 @@
 #include "WarningHud.h"
 #include "Config.h"
+#include "GameAddr.h"
 #include "Log.h"
 #include "WarningStrings.h"
 #include "SubtitleRender.h"
@@ -9,8 +10,7 @@
 namespace WarningHud
 {
     // native 全域關卡控制器單例 → +0xA4C = ZOSD（HUD 物件，可為 0）。
-    static const DWORD kLevelCtrlSingletonPtr = 0x0082083C;
-    static const DWORD kZosdOffset            = 0xA4C;
+    static const DWORD kZosdOffset           = 0xA4C;
 
     // ZOSD +0x18C：警覺條緩動後顯示值（float 0..100），sub_6601D0 每幀寫。
     static const DWORD kZosdTensionEased = 0x18C;
@@ -36,7 +36,7 @@ namespace WarningHud
 
     static Level Evaluate()
     {
-        DWORD ctrl = *(DWORD*)kLevelCtrlSingletonPtr;
+        DWORD ctrl = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!ctrl) return LV_NONE;
         DWORD zosd = *(DWORD*)(ctrl + kZosdOffset);
         if (!zosd) return LV_NONE;

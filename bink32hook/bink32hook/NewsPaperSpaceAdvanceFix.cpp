@@ -1,12 +1,14 @@
 #include "NewsPaperSpaceAdvanceFix.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include "ZipPathTrace.h"
 #include <cstring>
 
 namespace NewsPaperSpaceAdvanceFix
 {
-    static const DWORD kSite = 0x559DB8; // case32(literal space)的v98快取讀取點
-    // 回跳位址0x559DC0＝緊接的mov[esp+20h],ecx，patch長度8 bytes
+    // case32(literal space)的v98快取讀取點；回跳位址＝緊接的mov[esp+20h],ecx，patch長度8 bytes。
+    static DWORD g_vaSite   = 0;
+    static DWORD g_vaResume = 0;
 
     // 跟NewsPaperImageWrapHook.cpp同一套判斷，這裡刻意不共用——修行為的
     // hook各自獨立判斷，避免耦合。
@@ -64,14 +66,18 @@ namespace NewsPaperSpaceAdvanceFix
             movsx ecx, byte ptr [eax + 0x10]
 
         Resume:
-            mov  edx, 0x559DC0
-            jmp  edx
+            jmp  dword ptr [g_vaResume]
         }
     }
 
     static bool PatchSite(DWORD site, const BYTE expected[8], void* detour, const char* label)
     {
         BYTE* p = (BYTE*)site;
+        if (IsBadReadPtr(p, 8))
+        {
+            Log::Write("[NewsPaperSpaceAdvanceFix] %s 0x%08X無法讀取，放棄安裝", label, site);
+            return false;
+        }
         for (int i = 0; i < 8; i++)
         {
             if (p[i] != expected[i])
@@ -100,7 +106,15 @@ namespace NewsPaperSpaceAdvanceFix
         // 原始byte。
         static const BYTE kExpected[8] = { 0x8B, 0x44, 0x24, 0x48, 0x0F, 0xBE, 0x48, 0x10 };
 
-        bool ok = PatchSite(kSite, kExpected, &Detour_SpaceAdvance, "case32空白advance修正點(0x559DB8)");
+        g_vaSite   = GameAddr::Addr(AddressTable::NewsSpaceAdvance_Site);
+        g_vaResume = GameAddr::Addr(AddressTable::NewsSpaceAdvance_Resume);
+        if (!g_vaSite || !g_vaResume)
+        {
+            Log::Write("[NewsPaperSpaceAdvanceFix] 位址查詢失敗（site=0x%08X resume=0x%08X），放棄安裝", g_vaSite, g_vaResume);
+            return false;
+        }
+
+        bool ok = PatchSite(g_vaSite, kExpected, &Detour_SpaceAdvance, "case32空白advance修正點");
         Log::Write("[NewsPaperSpaceAdvanceFix] 安裝結果：%d", ok);
         return ok;
     }

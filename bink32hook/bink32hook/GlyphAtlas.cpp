@@ -1,6 +1,7 @@
 #include "GlyphAtlas.h"
 #include "Log.h"
 #include "Config.h"
+#include "GameAddr.h"
 #include <unordered_map>
 #include <vector>
 #include <cstring>
@@ -72,15 +73,13 @@ namespace GlyphAtlas
     // 在報紙/postmission 畫面」每次設定；GetGlyphInSlot/BlitGray8 印溢位定位側錄用。
     static bool g_overrunProbe = false;
 
-    // 0x90AF0C是一個wrapper物件的指標，wrapper+0x04才是真正的
+    // AddressTable::D3D9WrapperPtr是一個wrapper物件的指標，wrapper+0x04才是真正的
     // IDirect3DDevice9*。DLL載入當下這個裝置必定還不存在，要lazy retry（每次
     // GetGlyph呼叫都重新檢查）。整個引擎共用單一全域裝置，3個字型分類共用同
     // 一份GetRenderScale()結果。
-    static const DWORD kVA_D3D9WrapperPtr = 0x0090AF0C;
-
     IDirect3DDevice9* GetD3D9Device()
     {
-        DWORD wrapper = *(DWORD*)kVA_D3D9WrapperPtr;
+        DWORD wrapper = GameAddr::ReadDword(AddressTable::D3D9WrapperPtr);
         if (!wrapper) return nullptr;  // wrapper物件還沒建立
         return *(IDirect3DDevice9**)(wrapper + 4);
     }

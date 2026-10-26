@@ -1,6 +1,7 @@
 ﻿// [DEBUG專用] TEX entry分派側錄工具，預設停用（Hook.cpp的Install()呼叫已註解）。
 #include "TexDispatchHook.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include <cstring>
 
 namespace TexDispatchHook
@@ -27,8 +28,9 @@ namespace TexDispatchHook
     //   push ebx           ; 53          (1 byte)
     // 剛好5 bytes，足夠塞5-byte jmp，不用補NOP，回跳位址對齊第三句指令
     // (push ebp)起點。
-    static const DWORD kVA_Entry = 0x0048F330;
-    static const DWORD kVA_ReturnTo = 0x0048F335;
+    // 此 hook 目前停用（Hook.cpp 未呼叫 Install）。
+    static DWORD g_vaEntry = 0;
+    static DWORD g_vaResume = 0;
 
     static DWORD g_thisStash = 0;
     static DWORD g_arg0Stash = 0;
@@ -104,21 +106,34 @@ namespace TexDispatchHook
             mov  eax, [esp+4]
             push ebx
 
-            mov  edx, kVA_ReturnTo
+            mov  edx, dword ptr [g_vaResume]
             jmp  edx
         }
     }
 
     void Install()
     {
-        BYTE* p = (BYTE*)kVA_Entry;
+        g_vaEntry = GameAddr::Addr(AddressTable::TexTypeDispatch_Entry);
+        g_vaResume = GameAddr::Addr(AddressTable::TexTypeDispatch_Resume);
+        if (!g_vaEntry || !g_vaResume)
+        {
+            Log::Write("[TexDispatchHook] 位址查詢失敗（entry=0x%08X resume=0x%08X），放棄安裝", g_vaEntry, g_vaResume);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaEntry;
         const BYTE kExpected[5] = { 0x8B, 0x44, 0x24, 0x04, 0x53 };
+        if (IsBadReadPtr(p, 5))
+        {
+            Log::Write("[TexDispatchHook] 0x%08X無法讀取，放棄安裝", g_vaEntry);
+            return;
+        }
         for (int i = 0; i < 5; i++)
         {
             if (p[i] != kExpected[i])
             {
                 Log::Write("[TexDispatchHook] 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝",
-                           kVA_Entry, i, p[i], kExpected[i]);
+                           g_vaEntry, i, p[i], kExpected[i]);
                 return;
             }
         }
@@ -130,6 +145,6 @@ namespace TexDispatchHook
         VirtualProtect(p, 5, oldProt, &oldProt);
         FlushInstructionCache(GetCurrentProcess(), p, 5);
 
-        Log::Write("[TexDispatchHook] sub_48F330 entry hook安裝完成：site=0x%08X detour=%p", kVA_Entry, &DispatchDetour);
+        Log::Write("[TexDispatchHook] sub_48F330 entry hook安裝完成：site=0x%08X detour=%p", g_vaEntry, &DispatchDetour);
     }
 }

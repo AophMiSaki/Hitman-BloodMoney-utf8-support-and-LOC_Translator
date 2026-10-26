@@ -1,6 +1,7 @@
 ﻿#include "GlyphHook.h"
 #include "Log.h"
 #include "Config.h"
+#include "GameAddr.h"
 #include "CJKRange.h"
 #include "GlyphAtlas.h"
 #include "NativeTextureRegistry.h"
@@ -18,33 +19,38 @@
 
 namespace GlyphHook
 {
-    static const DWORD kVA_CallSite = 0x0055A0A0;  // `call dword ptr [eax+238h]`，6 bytes: FF 90 38 02 00 00
-    // 回跳位址0x55A0A6（=kVA_CallSite+6）寫死在GlyphDetour的inline asm裡
-    // （MASM inline asm無法乾淨引用C++ static const symbol的值）。
+    // 主call site：`call dword ptr [eax+238h]`，6 bytes: FF 90 38 02 00 00
+    static DWORD g_vaCallSite       = 0;
+    static DWORD g_vaCallSiteResume = 0;
 
     // 另兩個vtable+0x238呼叫點：push的charcode是寫死常數0x20（空白），用途是查
     // 「空白字元寬度」給斷行演算法用；vtable在edx（不是eax），指令一樣是
     // 6 bytes: FF 92 38 02 00 00。SpaceCheck借這兩點在每次<font N>切換時探測報紙字級。
-    static const DWORD kVA_CallSiteSpaceA = 0x00559A21;  // 回跳位址0x559A27
-    static const DWORD kVA_CallSiteSpaceB = 0x00559AFC;  // 回跳位址0x559B02
+    static DWORD g_vaCallSiteSpaceA       = 0;
+    static DWORD g_vaCallSiteSpaceAResume = 0;
+    static DWORD g_vaCallSiteSpaceB       = 0;
+    static DWORD g_vaCallSiteSpaceBResume = 0;
 
-    // 0x550BE4：sub_5509D0（結構與sub_559910幾乎一樣的另一個獨立ZSimpleHTML排版
-    // 函式，主選單實際使用）裡字元驅動的GetGlyph呼叫。暫存器結構同0x55A0A0
+    // 選單：sub_5509D0（結構與sub_559910幾乎一樣的另一個獨立ZSimpleHTML排版
+    // 函式，主選單實際使用）裡字元驅動的GetGlyph呼叫。暫存器結構同主call site
     // （eax=vtable/ecx=this），只差charcode在ebp（不是edi）。
-    static const DWORD kVA_CallSiteMenu = 0x00550BE4;  // 回跳位址0x550BEA
+    static DWORD g_vaCallSiteMenu       = 0;
+    static DWORD g_vaCallSiteMenuResume = 0;
 
-    // 0x5555C9：sub_555590（字串寬度量測輔助函式）裡的GetGlyph呼叫。暫存器結構
+    // 寬度量測：sub_555590（字串寬度量測輔助函式）裡的GetGlyph呼叫。暫存器結構
     // 不同——vtable在ebp、charcode在eax（push前先call sub_4390C0取得）、
     // this=ecx(=esi)。
-    static const DWORD kVA_CallSiteMeasure = 0x005555C9;  // 回跳位址0x5555CF
+    static DWORD g_vaCallSiteMeasure       = 0;
+    static DWORD g_vaCallSiteMeasureResume = 0;
 
-    // 0x555A68：sub_555960（多行文字自動換行核心函式，engine\zwindows\zlineobj.cpp）
+    // 換行：sub_555960（多行文字自動換行核心函式，engine\zwindows\zlineobj.cpp）
     // 裡的GetGlyph呼叫，逐字元取寬度累加判斷斷行位置，call後讀回傳記錄的
     // advance欄位(+0x10)。vtable在edx、charcode在eax（非callee-saved，call後被
     // 回傳值蓋掉，需stash；但vtable在edx不能借edx當scratch覆寫[esp]的charcode，
     // 改借eax本身）。呼叫端與主渲染sub_559910/sub_5509D0是不同呼叫鏈，這條hook
     // 只覆蓋這個獨立的換行路徑。
-    static const DWORD kVA_CallSiteWrap = 0x00555A68;  // 回跳位址0x555A6E
+    static DWORD g_vaCallSiteWrap       = 0;
+    static DWORD g_vaCallSiteWrapResume = 0;
 
     static bool  g_diagEnable = false;
     static int   g_diagCap    = 300;
@@ -147,9 +153,8 @@ namespace GlyphHook
         return kPlaceholderChar;
     }
 
-    // siteId: 0=主(0x55A0A0)，1=選單(0x550BE4)，2=量測(0x5555C9)，
-    // 3=換行(0x555A68)。仍供GlyphResultCheck的log標籤使用。
-    static const char* const kSiteLabel[4] = { "主(0x55A0A0)", "選單(0x550BE4)", "量測(0x5555C9)", "換行(0x555A68)" };
+    // siteId: 0=主，1=選單，2=量測，3=換行。仍供GlyphResultCheck的log標籤使用。
+    static const char* const kSiteLabel[4] = { "主", "選單", "量測", "換行" };
 
     // __cdecl，供下面的naked detour呼叫。目前純diagnostic：偵測到CJK
     // codepoint時印一行log（受g_diagCap節流，避免掃過整個選單畫面洗版）。
@@ -200,7 +205,7 @@ namespace GlyphHook
     static DWORD g_newsFontSizeHits = 0;
     static const DWORD kNewsFontSizeDiagCap = 500;
 
-    // 與報紙font1~4對照的一般選單基準值——site=1(0x550BE4)、ASCII範圍，不受
+    // 與報紙font1~4對照的一般選單基準值——site=1(選單)、ASCII範圍，不受
     // g_diagEnable/IsNewspaperCategory限制（僅供下方已註解的[Menu][FontSize]
     // side-record）。
     static DWORD g_menuFontSizeHits = 0;
@@ -698,8 +703,7 @@ namespace GlyphHook
             call SynthesizeCJKGlyphRecord
             add  esp, 16
 
-            mov  edx, 0x55A0A6
-            jmp  edx
+            jmp  dword ptr [g_vaCallSiteResume]
         }
     }
 
@@ -718,8 +722,7 @@ namespace GlyphHook
 
             call dword ptr [edx + 238h]
 
-            mov  eax, 0x559A27
-            jmp  eax
+            jmp  dword ptr [g_vaCallSiteSpaceAResume]
         }
     }
 
@@ -736,8 +739,7 @@ namespace GlyphHook
 
             call dword ptr [edx + 238h]
 
-            mov  eax, 0x559B02
-            jmp  eax
+            jmp  dword ptr [g_vaCallSiteSpaceBResume]
         }
     }
 
@@ -797,8 +799,7 @@ namespace GlyphHook
             call SynthesizeCJKGlyphRecord
             add  esp, 16
 
-            mov  edx, 0x550BEA
-            jmp  edx
+            jmp  dword ptr [g_vaCallSiteMenuResume]
         }
     }
 
@@ -865,8 +866,7 @@ namespace GlyphHook
             call SynthesizeCJKGlyphRecord
             add  esp, 16
 
-            mov  edx, 0x5555CF
-            jmp  edx
+            jmp  dword ptr [g_vaCallSiteMeasureResume]
         }
     }
 
@@ -937,8 +937,7 @@ namespace GlyphHook
             call SynthesizeCJKGlyphRecord
             add  esp, 16
 
-            mov  edx, 0x555A6E
-            jmp  edx
+            jmp  dword ptr [g_vaCallSiteWrapResume]
         }
     }
 
@@ -949,6 +948,11 @@ namespace GlyphHook
     {
         BYTE* p = (BYTE*)site;
         const BYTE kExpected[6] = { 0xFF, modrmByte, 0x38, 0x02, 0x00, 0x00 };
+        if (IsBadReadPtr(p, 6))
+        {
+            Log::Write("[GlyphHook] %s 0x%08X無法讀取，放棄安裝", label, site);
+            return false;
+        }
         for (int i = 0; i < 6; i++)
         {
             if (p[i] != kExpected[i])
@@ -971,6 +975,17 @@ namespace GlyphHook
         return true;
     }
 
+    // site與resume任一為0（版本不明或查表失敗）就放棄該點並記log，否則交給PatchCallSite。
+    static bool InstallSite(DWORD site, DWORD resume, BYTE modrmByte, void* detour, const char* label)
+    {
+        if (!site || !resume)
+        {
+            Log::Write("[GlyphHook] %s 位址查詢失敗（site=0x%08X resume=0x%08X），放棄安裝", label, site, resume);
+            return false;
+        }
+        return PatchCallSite(site, modrmByte, detour, label);
+    }
+
     bool Install(HMODULE hModule)
     {
         g_hModule = hModule;  // DetermineCategory()偵測到報紙zip時lazy init要用
@@ -984,18 +999,31 @@ namespace GlyphHook
         // 字幕開關在 SubtitleHook 內部快取。
         g_synthEnable = Config::LoadGeneral(hModule).normalFontReplace;
 
-        bool mainOk = PatchCallSite(kVA_CallSite, 0x90, &GlyphDetour, "主call site(0x55A0A0)");
+        g_vaCallSite              = GameAddr::Addr(AddressTable::Glyph_MainSite);
+        g_vaCallSiteResume        = GameAddr::Addr(AddressTable::Glyph_MainResume);
+        g_vaCallSiteSpaceA        = GameAddr::Addr(AddressTable::Glyph_SpaceASite);
+        g_vaCallSiteSpaceAResume  = GameAddr::Addr(AddressTable::Glyph_SpaceAResume);
+        g_vaCallSiteSpaceB        = GameAddr::Addr(AddressTable::Glyph_SpaceBSite);
+        g_vaCallSiteSpaceBResume  = GameAddr::Addr(AddressTable::Glyph_SpaceBResume);
+        g_vaCallSiteMenu          = GameAddr::Addr(AddressTable::Glyph_MenuSite);
+        g_vaCallSiteMenuResume    = GameAddr::Addr(AddressTable::Glyph_MenuResume);
+        g_vaCallSiteMeasure       = GameAddr::Addr(AddressTable::Glyph_MeasureSite);
+        g_vaCallSiteMeasureResume = GameAddr::Addr(AddressTable::Glyph_MeasureResume);
+        g_vaCallSiteWrap          = GameAddr::Addr(AddressTable::Glyph_LineBreakSite);
+        g_vaCallSiteWrapResume    = GameAddr::Addr(AddressTable::Glyph_LineBreakResume);
+
+        bool mainOk = InstallSite(g_vaCallSite, g_vaCallSiteResume, 0x90, &GlyphDetour, "主call site");
         // 這兩個是額外診斷點，失敗只記log（PatchCallSite內部已處理），不影響
         // 主hook的安裝結果——即使main site版本不符要放棄，還是想知道這兩個
         // 空白候選點的狀況。
-        PatchCallSite(kVA_CallSiteSpaceA, 0x92, &GlyphDetourSpaceA, "空白候選點A(0x559A21)");
-        PatchCallSite(kVA_CallSiteSpaceB, 0x92, &GlyphDetourSpaceB, "空白候選點B(0x559AFC)");
+        InstallSite(g_vaCallSiteSpaceA, g_vaCallSiteSpaceAResume, 0x92, &GlyphDetourSpaceA, "空白候選點A");
+        InstallSite(g_vaCallSiteSpaceB, g_vaCallSiteSpaceBResume, 0x92, &GlyphDetourSpaceB, "空白候選點B");
 
         // sub_5509D0(主選單排版)、sub_555590(字串寬度量測)、sub_555960(自動換行)
         // 的GetGlyph呼叫點。同樣獨立安裝、失敗不影響mainOk。
-        PatchCallSite(kVA_CallSiteMenu, 0x90, &GlyphDetourMenu, "選單call site(0x550BE4)");
-        PatchCallSite(kVA_CallSiteMeasure, 0x95, &GlyphDetourMeasure, "寬度量測call site(0x5555C9)");
-        PatchCallSite(kVA_CallSiteWrap, 0x92, &GlyphDetourWrap, "換行call site(0x555A68)");
+        InstallSite(g_vaCallSiteMenu, g_vaCallSiteMenuResume, 0x90, &GlyphDetourMenu, "選單call site");
+        InstallSite(g_vaCallSiteMeasure, g_vaCallSiteMeasureResume, 0x95, &GlyphDetourMeasure, "寬度量測call site");
+        InstallSite(g_vaCallSiteWrap, g_vaCallSiteWrapResume, 0x92, &GlyphDetourWrap, "換行call site");
 
         if (!mainOk) return false;
 

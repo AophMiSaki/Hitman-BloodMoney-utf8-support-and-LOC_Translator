@@ -1,5 +1,6 @@
 #include "LabelWidthFixInventory.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include "Config.h"
 #include "GlyphAtlas.h"
 #include "FontCategory.h"
@@ -13,16 +14,18 @@ namespace LabelWidthFixInventory
     static bool s_diagEnable = false;
 
     // native側常數/函式指標。
-    static const DWORD kSiteA   = 0x006820F1;
-    static const DWORD kSiteB   = 0x00682725;
+    static DWORD g_vaSiteA   = 0;
+    static DWORD g_vaResumeA = 0;
+    static DWORD g_vaSiteB   = 0;
+    static DWORD g_vaResumeB = 0;
 
     typedef int (__stdcall *Fn_MeasureLabel)(int, float*, int);
-    static const Fn_MeasureLabel NativeMeasureLabel = (Fn_MeasureLabel)0x0055E550;
+    static Fn_MeasureLabel NativeMeasureLabel = nullptr;
 
     typedef int (__cdecl *Fn_HasChild)(int);
     typedef int (__thiscall *Fn_NextChild)(int);
-    static const Fn_HasChild  NativeHasChild  = (Fn_HasChild)0x004EB700;
-    static const Fn_NextChild NativeNextChild = (Fn_NextChild)0x00431E20;
+    static Fn_HasChild  NativeHasChild  = nullptr;
+    static Fn_NextChild NativeNextChild = nullptr;
 
     typedef DWORD (__thiscall *Fn_GetRttiTag)(void*);
     static DWORD GetRttiTag(void* obj)
@@ -31,9 +34,6 @@ namespace LabelWidthFixInventory
         Fn_GetRttiTag fn = (Fn_GetRttiTag)(*(DWORD*)((BYTE*)vtbl + 0x34));
         return fn(obj);
     }
-
-    static const DWORD kRttiTagAddr  = 0x009A2B98;
-    static const DWORD kRttiMaskAddr = 0x009A2B9C;
 
     static const char* const kHookNames[2] = { "A(case1)", "B(common7)" };
 
@@ -138,8 +138,8 @@ namespace LabelWidthFixInventory
         float widgetOffset = ReadWidgetOffset(sourceWidget);
         float v5 = outBufAfterNative - widgetOffset - (float)padding;
 
-        DWORD rttiTag  = *(DWORD*)kRttiTagAddr;
-        DWORD rttiMask = *(DWORD*)kRttiMaskAddr;
+        DWORD rttiTag  = GameAddr::ReadDword(AddressTable::RttiTag);
+        DWORD rttiMask = GameAddr::ReadDword(AddressTable::RttiMask);
 
         int matchCount = 0;
         const char* firstCaption = nullptr;
@@ -215,8 +215,7 @@ namespace LabelWidthFixInventory
 
             add esp, 12          ; 補清掉原本a1/a2/a3
 
-            mov eax, 0x006820F6  ; kResumeA
-            jmp eax
+            jmp dword ptr [g_vaResumeA]
         }
     }
 
@@ -239,23 +238,27 @@ namespace LabelWidthFixInventory
 
             add esp, 12
 
-            mov eax, 0x0068272A  ; kResumeB
-            jmp eax
+            jmp dword ptr [g_vaResumeB]
         }
     }
 
-    static bool PatchSite(DWORD site, const BYTE expected[5], void* detour, const char* label)
+    // 原指令是 `E8 rel32`（call MeasureLabel）。rel32 隨版本不同，不逐 byte 比對，
+    // 改驗證 call 目標等於表內的 MeasureLabel。
+    static bool PatchSite(DWORD site, DWORD expectedTarget, void* detour, const char* label)
     {
         BYTE* p = (BYTE*)site;
-        for (int i = 0; i < 5; i++)
+        if (IsBadReadPtr(p, 5))
         {
-            if (p[i] != expected[i])
-            {
-                Log::Write("[LabelWidthFixInventory] %s 0x%08X第%d byte是0x%02X，預期0x%02X"
-                           "——版本不符或已被其他patch動過，放棄安裝",
-                           label, site, i, p[i], expected[i]);
-                return false;
-            }
+            Log::Write("[LabelWidthFixInventory] %s 0x%08X無法讀取，放棄安裝", label, site);
+            return false;
+        }
+        DWORD target = site + 5 + *(INT32*)(p + 1);
+        if (p[0] != 0xE8 || target != expectedTarget)
+        {
+            Log::Write("[LabelWidthFixInventory] %s 0x%08X第0 byte=0x%02X call目標=0x%08X，預期E8且目標0x%08X"
+                       "——版本不符或已被其他patch動過，放棄安裝",
+                       label, site, p[0], target, expectedTarget);
+            return false;
         }
 
         DWORD oldProt = 0;
@@ -273,11 +276,25 @@ namespace LabelWidthFixInventory
     {
         s_diagEnable = Config::LoadDebug(hModule).labelWidthFixDiagEnable;
 
-        static const BYTE kExpectedA[5] = { 0xE8, 0x5A, 0xC4, 0xED, 0xFF };
-        static const BYTE kExpectedB[5] = { 0xE8, 0x26, 0xBE, 0xED, 0xFF };
+        g_vaSiteA   = GameAddr::Addr(AddressTable::InventoryLabel_SiteA);
+        g_vaResumeA = GameAddr::Addr(AddressTable::InventoryLabel_ResumeA);
+        g_vaSiteB   = GameAddr::Addr(AddressTable::InventoryLabel_SiteB);
+        g_vaResumeB = GameAddr::Addr(AddressTable::InventoryLabel_ResumeB);
+        DWORD vaMeasure = GameAddr::Addr(AddressTable::MeasureLabel);
+        DWORD vaHas     = GameAddr::Addr(AddressTable::HasChild);
+        DWORD vaNext    = GameAddr::Addr(AddressTable::NextChild);
+        if (!g_vaSiteA || !g_vaResumeA || !g_vaSiteB || !g_vaResumeB || !vaMeasure || !vaHas || !vaNext)
+        {
+            Log::Write("[LabelWidthFixInventory] 位址查詢失敗（A=0x%08X/0x%08X B=0x%08X/0x%08X measure=0x%08X has=0x%08X next=0x%08X），放棄安裝",
+                       g_vaSiteA, g_vaResumeA, g_vaSiteB, g_vaResumeB, vaMeasure, vaHas, vaNext);
+            return false;
+        }
+        NativeMeasureLabel = (Fn_MeasureLabel)vaMeasure;
+        NativeHasChild     = (Fn_HasChild)vaHas;
+        NativeNextChild    = (Fn_NextChild)vaNext;
 
-        bool okA = PatchSite(kSiteA, kExpectedA, &DetourA, "Hook A case1(0x6820F1)");
-        bool okB = PatchSite(kSiteB, kExpectedB, &DetourB, "Hook B共用7組(0x682725)");
+        bool okA = PatchSite(g_vaSiteA, vaMeasure, &DetourA, "Hook A case1");
+        bool okB = PatchSite(g_vaSiteB, vaMeasure, &DetourB, "Hook B共用7組");
         return okA && okB;
     }
 }

@@ -1,5 +1,6 @@
 #include "SubtitleGate.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include "Config.h"
 #include "FontCategory.h"
 #include "GlyphAtlas.h"
@@ -21,9 +22,12 @@ namespace SubtitleGate
     //
     // 0x661FD0 起 7 bytes（`push ebx` 1 byte ＋ `mov bl,byte_8ACA9C` 6 bytes
     // 共兩條完整指令），5-byte JMP patch 後剩 2 bytes 補 NOP。
-    static const DWORD kVA_ShowSubtitleSite = 0x00661FD0;
-    static const DWORD kVA_ShowSubtitleContinue = 0x00661FD7;
+    static DWORD g_vaShowSubtitleSite = 0;
+    static DWORD g_vaShowSubtitleResume = 0;
+    static DWORD g_vaSubtitleEnableFlag = 0;
+    // 第 3～6 byte 是 byte_8ACA9C（字幕開關旗標）的位址，隨版本不同；比對時略過，另外單獨驗證它等於表內的旗標位址。
     static const BYTE kExpectedShowSubtitle[7] = { 0x53, 0x8A, 0x1D, 0x9C, 0xCA, 0x8A, 0x00 };
+    static const GameAddr::Wild kShowSubtitleWild[] = { { 3, 4 } };
 
     // ★watchdog 用：每次任何人（原生對話、我們補顯、watchdog 清除）呼叫
     // sub_661FD0 都會累加，供 watchdog 判斷「這段期間畫面上顯示的還是不是
@@ -54,7 +58,8 @@ namespace SubtitleGate
         __asm
         {
             push ebx
-            mov bl, byte ptr ds:[0x008ACA9C]
+            mov eax, dword ptr [g_vaSubtitleEnableFlag]
+            mov bl, byte ptr [eax]
 
             mov eax, [esp+4]
             mov edx, [esp+8]
@@ -69,21 +74,31 @@ namespace SubtitleGate
             popad
             popfd
 
-            jmp kVA_ShowSubtitleContinue
+            jmp dword ptr [g_vaShowSubtitleResume]
         }
     }
 
     void InstallNativeSubtitleWatchdog()
     {
-        BYTE* p = (BYTE*)kVA_ShowSubtitleSite;
-        for (int i = 0; i < 7; i++)
+        g_vaShowSubtitleSite = GameAddr::Addr(AddressTable::ShowSubtitle_Entry);
+        g_vaShowSubtitleResume = GameAddr::Addr(AddressTable::ShowSubtitle_Resume);
+        g_vaSubtitleEnableFlag = GameAddr::Addr(AddressTable::SubtitleEnableFlag);
+        if (!g_vaShowSubtitleSite || !g_vaShowSubtitleResume || !g_vaSubtitleEnableFlag)
         {
-            if (p[i] != kExpectedShowSubtitle[i])
-            {
-                Log::Write("[SubtitleGate] 0x%08X第%d byte是0x%02X，預期0x%02X"
-                           "——版本不符或已被其他patch動過，放棄安裝sub_661FD0側錄", kVA_ShowSubtitleSite, i, p[i], kExpectedShowSubtitle[i]);
-                return;
-            }
+            Log::Write("[SubtitleGate] 位址查詢失敗（site=0x%08X resume=0x%08X flag=0x%08X），放棄安裝sub_661FD0側錄",
+                       g_vaShowSubtitleSite, g_vaShowSubtitleResume, g_vaSubtitleEnableFlag);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaShowSubtitleSite;
+        if (!GameAddr::MatchMasked(g_vaShowSubtitleSite, kExpectedShowSubtitle, 7, kShowSubtitleWild, 1) ||
+            *(const DWORD*)(p + 3) != g_vaSubtitleEnableFlag)
+        {
+            char hex[64];
+            GameAddr::HexAt(g_vaShowSubtitleSite, 7, hex, sizeof(hex));
+            Log::Write("[SubtitleGate] 0x%08X位元組不符：實際=%s預期=53 8A 1D <旗標位址0x%08X> 00"
+                       "——版本不符或已被其他patch動過，放棄安裝sub_661FD0側錄", g_vaShowSubtitleSite, hex, g_vaSubtitleEnableFlag);
+            return;
         }
 
         DWORD oldProt = 0;
@@ -97,21 +112,21 @@ namespace SubtitleGate
 
         Log::Write("[SubtitleGate] sub_661FD0(顯示字幕)入口側錄安裝完成：site=0x%08X detour=%p"
                    "（供watchdog追蹤sub_661FD0呼叫次數）",
-                   kVA_ShowSubtitleSite, &Detour_ShowSubtitleEntry);
+                   g_vaShowSubtitleSite, &Detour_ShowSubtitleEntry);
     }
 
     // ---- 共用 native VA ----
 
     static float GetNowSec()
     {
-        DWORD base = *(const DWORD*)0x00820820;
+        DWORD base = GameAddr::ReadDword(AddressTable::GameDataBase);
         if (!base) return 0.0f;
         return (float)(*(const int*)(base + 56)) * 0.0009765625f;
     }
 
     static DWORD GetOsdPtr()
     {
-        DWORD gameData = *(const DWORD*)0x0082083C;
+        DWORD gameData = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!gameData) return 0;
         return *(const DWORD*)(gameData + 0xA4C);
     }
@@ -244,17 +259,19 @@ namespace SubtitleGate
     }
 
     // thiscall sub_661FD0(ZOSD* this, char* String2, float duration)。
-    static const DWORD kVA_ShowSubtitleFn = 0x00661FD0;
-
     static void ShowExtraSubtitle(DWORD osd, const char* locKey)
     {
+        DWORD showSubtitleFn = GameAddr::Addr(AddressTable::ShowSubtitle_Entry);
+        if (!showSubtitleFn) return;
+
         __asm
         {
             push 0                    ; duration = 0.0f
             mov eax, locKey
             push eax                  ; String2
             mov ecx, osd              ; this = m_OSD
-            call kVA_ShowSubtitleFn
+            mov edx, showSubtitleFn
+            call edx
         }
 
         // sub_661FD0 入口側錄 detour 剛在上面的 call 內把 g_showSubtitleGeneration
@@ -430,17 +447,25 @@ namespace SubtitleGate
     // 距離門檻：ini `[Subtitle] NpcHearRadius`，單位（公分/公尺）未確認、需
     // 實機測試調整；0＝停用過濾。用平方距離比較，避免每次算 sqrt。
     typedef DWORD(__cdecl* ResolveActorFn)(int handle);
-    static const ResolveActorFn NativeResolveActor = (ResolveActorFn)0x004E5BE0;
+    static DWORD NativeResolveActor(int handle)
+    {
+        ResolveActorFn fn = (ResolveActorFn)GameAddr::Addr(AddressTable::ResolveActor);
+        return fn ? fn(handle) : 0;
+    }
 
     typedef void(__thiscall* GetRootPointFn)(void* thisPtr, float* outPos);
-    static const GetRootPointFn NativeGetRootPoint = (GetRootPointFn)0x004E68E0;
+    static void NativeGetRootPoint(void* thisPtr, float* outPos)
+    {
+        GetRootPointFn fn = (GetRootPointFn)GameAddr::Addr(AddressTable::GetRootPoint);
+        if (fn) fn(thisPtr, outPos);
+    }
 
     static float g_npcHearRadiusSq = 1000.0f * 1000.0f;
     static bool  g_npcHearRadiusEnabled = true;
 
     static void* GetPlayerActorPtr()
     {
-        DWORD gameData = *(const DWORD*)0x0082083C;
+        DWORD gameData = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!gameData) return nullptr;
         return (void*)(*(const DWORD*)(gameData + 0xA40));
     }

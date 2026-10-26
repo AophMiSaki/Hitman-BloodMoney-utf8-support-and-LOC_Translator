@@ -2,6 +2,7 @@
 #include "NativeTextureRegistry.h"
 #include "LocHook.h"
 #include "Log.h"
+#include "GameAddr.h"
 // [ExcTrace 取消註解 1/5] 以下兩行
 // #include <stdio.h>
 #include <string.h>
@@ -10,8 +11,8 @@
 namespace TextureManagerReleaseHook
 {
     // sub_48F190 = ZTextureManagerD3D::ReleaseTextures 的入口 5 bytes（kExpected，安裝前比對）。
-    static const DWORD kVA_Entry = 0x0048F190;
-    static const DWORD kVA_ReturnTo = 0x0048F195;
+    static DWORD g_vaEntry = 0;
+    static DWORD g_vaResume = 0;
     static const BYTE kExpected[5] = { 0x53, 0x56, 0x8B, 0xD9, 0x57 };
 
     static DWORD g_thisStash = 0;
@@ -92,28 +93,31 @@ namespace TextureManagerReleaseHook
             mov  ebx, ecx
             push edi
 
-            jmp  kVA_ReturnTo
+            jmp  dword ptr [g_vaResume]
         }
     }
 
     // sub_45FCF0 = 場景資料載入的入口 8 bytes。
-    static const DWORD kVA_Scene = 0x0045FCF0;
-    static const DWORD kVA_SceneReturnTo = 0x0045FCF8;
+    static DWORD g_vaScene = 0;
+    static DWORD g_vaSceneResume = 0;
     static const BYTE kSceneExpected[8] = { 0x6A, 0xFF, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00 };
 
     // sub_496F00 = 著色器效果載入的入口 7 bytes。
-    static const DWORD kVA_Fx = 0x00496F00;
-    static const DWORD kVA_FxReturnTo = 0x00496F07;
+    static DWORD g_vaFx = 0;
+    static DWORD g_vaFxResume = 0;
+    // 第 3～6 byte 是 SEH handler 位址（push imm32），隨版本不同；比對時略過，安裝前讀出原值，由 FxDetour 重跑 push 使用。
     static const BYTE kFxExpected[7] = { 0x6A, 0xFF, 0x68, 0x9F, 0xD5, 0x72, 0x00 };
+    static const GameAddr::Wild kFxWild[] = { { 3, 4 } };
+    static DWORD g_fxSehHandler = 0;
 
     // 引擎 256 MB 保留區管理器（0x8B4FE8）：區塊數（+0xB88）、初始化旗標。
-    static const DWORD kVA_MgrBlockCount = 0x008B5B70;
-    static const DWORD kVA_MgrInitFlag = 0x008B5B7C;
+    static DWORD g_vaMgrBlockCount = 0;
+    static DWORD g_vaMgrInitFlag = 0;
     // 保留區基底（+0xB8C）、管理器物件、管理器全域臨界區。
     // 第 i 個 1 MB 區塊的表格在 物件 + 0x388 + i×8：+0 free list 頭(dword)、+4 已用頁數(word)、+6 下一個新頁序號(word)。
-    static const DWORD kVA_MgrBase = 0x008B5B74;
-    static const DWORD kVA_MgrObj = 0x008B4FE8;
-    static const DWORD kVA_MgrCS = 0x008B4FCC;
+    static DWORD g_vaMgrBase = 0;
+    static DWORD g_vaMgrObj = 0;
+    static DWORD g_vaMgrCS = 0;
 
     static volatile LONG g_sceneActive = 0;
     static DWORD g_sceneRet = 0;
@@ -305,7 +309,7 @@ namespace TextureManagerReleaseHook
                            e->a, e->b, e->c, e->c * 16, e->d, e->e);
                 break;
             case 2:
-                Log::Write("[LowFix] 未替換：取鎖失敗(0x8B4FCC)，d3d向高位址配置 0x%08X 大小=%u KB 維持原狀", e->a, e->b >> 10);
+                Log::Write("[LowFix] 未替換：取鎖失敗(管理器臨界區)，d3d向高位址配置 0x%08X 大小=%u KB 維持原狀", e->a, e->b >> 10);
                 break;
             case 3:
                 Log::Write("[LowFix] 未替換：保留區預算不足，d3d向高位址配置維持原狀｜管理器區塊數=%u 需要 k=%u 預算上限=%u", e->a, e->b, e->c);
@@ -331,12 +335,12 @@ namespace TextureManagerReleaseHook
         DWORD base = 0, total = 0, count = 0;
         __try
         {
-            if (!(*(const DWORD*)kVA_MgrInitFlag & 1)) return;
-            count = *(const DWORD*)kVA_MgrBlockCount;
-            base = *(const DWORD*)kVA_MgrBase;
-            const CRITICAL_SECTION* cs = (const CRITICAL_SECTION*)kVA_MgrCS;
+            if (!(*(const DWORD*)g_vaMgrInitFlag & 1)) return;
+            count = *(const DWORD*)g_vaMgrBlockCount;
+            base = *(const DWORD*)g_vaMgrBase;
+            const CRITICAL_SECTION* cs = (const CRITICAL_SECTION*)g_vaMgrCS;
             MEMORY_BASIC_INFORMATION mbi = {};
-            if (!cs->DebugInfo) why = "管理器臨界區 0x8B4FCC 未初始化";
+            if (!cs->DebugInfo) why = "管理器臨界區未初始化";
             else if (count > 0x100) why = "管理器區塊數大於 256";
             else if (!base || (base & 0xFFFF)) why = "保留區基底為 0 或未 64 KB 對齊";
             else if (!VirtualQuery((const void*)base, &mbi, sizeof(mbi)) || mbi.Type != MEM_PRIVATE || (DWORD)mbi.AllocationBase != base)
@@ -428,7 +432,7 @@ namespace TextureManagerReleaseHook
         passthru:
             push 0FFFFFFFFh
             mov  eax, dword ptr fs:[0]
-            jmp  dword ptr [kVA_SceneReturnTo]
+            jmp  dword ptr [g_vaSceneResume]
         }
     }
 
@@ -475,22 +479,27 @@ namespace TextureManagerReleaseHook
 
         passthru:
             push 0FFFFFFFFh
-            push 0072D59Fh
-            jmp  dword ptr [kVA_FxReturnTo]
+            push dword ptr [g_fxSehHandler]
+            jmp  dword ptr [g_vaFxResume]
         }
     }
 
-    static bool PatchJmp(DWORD va, const BYTE* expected, int len, void* detour, const char* tag)
+    static bool PatchJmp(DWORD va, const BYTE* expected, int len, void* detour, const char* tag,
+                         const GameAddr::Wild* wild = nullptr, size_t nWild = 0)
     {
         BYTE* p = (BYTE*)va;
-        for (int i = 0; i < len; i++)
+        if (IsBadReadPtr(p, len))
         {
-            if (p[i] != expected[i])
-            {
-                Log::Write("[LowFix] %s 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝",
-                           tag, va, i, p[i], expected[i]);
-                return false;
-            }
+            Log::Write("[LowFix] %s 0x%08X無法讀取，放棄安裝", tag, va);
+            return false;
+        }
+        if (!GameAddr::MatchMasked(va, expected, len, wild, nWild))
+        {
+            char hex[64];
+            GameAddr::HexAt(va, len, hex, sizeof(hex));
+            Log::Write("[LowFix] %s 0x%08X位元組不符：實際=%s預期=%s——版本不符或已被其他patch動過，放棄安裝",
+                       tag, va, hex, nWild ? "（含位址欄位，略過比對）" : "逐byte相同");
+            return false;
         }
 
         DWORD oldProt = 0;
@@ -515,8 +524,8 @@ namespace TextureManagerReleaseHook
                              SIZE_T reqSize, DWORD addr, SIZE_T size, LONG st)
     {
         DWORD k = (DWORD)((size + 0xFFFFF) >> 20);
-        DWORD count = *(const DWORD*)kVA_MgrBlockCount;
-        DWORD base = *(const DWORD*)kVA_MgrBase;
+        DWORD count = *(const DWORD*)g_vaMgrBlockCount;
+        DWORD base = *(const DWORD*)g_vaMgrBase;
 
         if (count + k + kFixBudgetMargin > g_fixMaxBlocks)
         {
@@ -550,12 +559,12 @@ namespace TextureManagerReleaseHook
 
         for (DWORD i = 0; i < k; i++)
         {
-            BYTE* t = (BYTE*)(kVA_MgrObj + 0x388 + (count + i) * 8);
+            BYTE* t = (BYTE*)(g_vaMgrObj + 0x388 + (count + i) * 8);
             *(DWORD*)t = 0;
             *(WORD*)(t + 4) = 16;
             *(WORD*)(t + 6) = 16;
         }
-        *(DWORD*)kVA_MgrBlockCount = count + k;
+        *(DWORD*)g_vaMgrBlockCount = count + k;
 
         *pBase = (PVOID)target;
         *pSize = size;
@@ -583,7 +592,7 @@ namespace TextureManagerReleaseHook
         if (addr < 0x80000000u) return st;
         g_fixHighSeen++;
         if (g_fixState != 1) return st;
-        if (!TryEnterCriticalSection((LPCRITICAL_SECTION)kVA_MgrCS))
+        if (!TryEnterCriticalSection((LPCRITICAL_SECTION)g_vaMgrCS))
         {
             FixEvent(2, addr, (DWORD)size, 0, 0, 0);
             return st;
@@ -598,7 +607,7 @@ namespace TextureManagerReleaseHook
             }
             __finally
             {
-                LeaveCriticalSection((LPCRITICAL_SECTION)kVA_MgrCS);
+                LeaveCriticalSection((LPCRITICAL_SECTION)g_vaMgrCS);
             }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
@@ -701,22 +710,56 @@ namespace TextureManagerReleaseHook
         //     g_vehInstalled = AddVectoredExceptionHandler(1, VehHandler) != NULL;
         //     Log::Write("[ExcTrace] 向量式例外處理器%s", g_vehInstalled ? "安裝完成" : "安裝失敗");
         // }
-        PatchJmp(kVA_Fx, kFxExpected, 7, (void*)&FxDetour, "sub_496F00(著色器效果載入)");
-        PatchJmp(kVA_Scene, kSceneExpected, 8, (void*)&SceneDetour, "sub_45FCF0(場景資料載入)");
+        // 讀出原指令 push imm32 的 SEH handler 位址，供 FxDetour 重跑被覆蓋的 push（必須在 PatchJmp 覆寫前讀）。
+        if (!IsBadReadPtr((void*)g_vaFx, 7)) g_fxSehHandler = *(const DWORD*)(g_vaFx + 3);
+        PatchJmp(g_vaFx, kFxExpected, 7, (void*)&FxDetour, "sub_496F00(著色器效果載入)", kFxWild, 1);
+        PatchJmp(g_vaScene, kSceneExpected, 8, (void*)&SceneDetour, "sub_45FCF0(場景資料載入)");
         InstallNtHook();
+    }
+
+    // 查表填入全部位址；任一為 0 就整個放棄（含 NtAllocateVirtualMemory hook，它依賴管理器位址）。
+    static bool ResolveAddrs()
+    {
+        g_vaEntry = GameAddr::Addr(AddressTable::ReleaseTextures_Entry);
+        g_vaResume = GameAddr::Addr(AddressTable::ReleaseTextures_Resume);
+        g_vaScene = GameAddr::Addr(AddressTable::SceneDataLoad_Entry);
+        g_vaSceneResume = GameAddr::Addr(AddressTable::SceneDataLoad_Resume);
+        g_vaFx = GameAddr::Addr(AddressTable::ShaderEffectLoad_Entry);
+        g_vaFxResume = GameAddr::Addr(AddressTable::ShaderEffectLoad_Resume);
+        g_vaMgrBlockCount = GameAddr::Addr(AddressTable::TextureMgrBlockCount);
+        g_vaMgrInitFlag = GameAddr::Addr(AddressTable::TextureMgrInitFlag);
+        g_vaMgrBase = GameAddr::Addr(AddressTable::TextureMgrBase);
+        g_vaMgrObj = GameAddr::Addr(AddressTable::TextureMgrObject);
+        g_vaMgrCS = GameAddr::Addr(AddressTable::TextureMgrCriticalSection);
+        if (g_vaEntry && g_vaResume && g_vaScene && g_vaSceneResume && g_vaFx && g_vaFxResume &&
+            g_vaMgrBlockCount && g_vaMgrInitFlag && g_vaMgrBase && g_vaMgrObj && g_vaMgrCS)
+            return true;
+
+        Log::Write("[TextureManagerReleaseHook] 位址查詢失敗，放棄安裝（entry=0x%08X/0x%08X scene=0x%08X/0x%08X fx=0x%08X/0x%08X "
+                   "mgr: blockCount=0x%08X initFlag=0x%08X base=0x%08X obj=0x%08X cs=0x%08X）",
+                   g_vaEntry, g_vaResume, g_vaScene, g_vaSceneResume, g_vaFx, g_vaFxResume,
+                   g_vaMgrBlockCount, g_vaMgrInitFlag, g_vaMgrBase, g_vaMgrObj, g_vaMgrCS);
+        return false;
     }
 
     void Install()
     {
+        if (!ResolveAddrs()) return;
+
         InstallSceneHooks();
 
-        BYTE* p = (BYTE*)kVA_Entry;
+        BYTE* p = (BYTE*)g_vaEntry;
+        if (IsBadReadPtr(p, 5))
+        {
+            Log::Write("[TextureManagerReleaseHook] 0x%08X無法讀取，放棄安裝", g_vaEntry);
+            return;
+        }
         for (int i = 0; i < 5; i++)
         {
             if (p[i] != kExpected[i])
             {
                 Log::Write("[TextureManagerReleaseHook] 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝",
-                           kVA_Entry, i, p[i], kExpected[i]);
+                           g_vaEntry, i, p[i], kExpected[i]);
                 return;
             }
         }
@@ -728,6 +771,6 @@ namespace TextureManagerReleaseHook
         VirtualProtect(p, 5, oldProt, &oldProt);
         FlushInstructionCache(GetCurrentProcess(), p, 5);
 
-        Log::Write("[TextureManagerReleaseHook] sub_48F190 entry hook安裝完成：site=0x%08X detour=%p", kVA_Entry, &ReleaseTexturesDetour);
+        Log::Write("[TextureManagerReleaseHook] sub_48F190 entry hook安裝完成：site=0x%08X detour=%p", g_vaEntry, &ReleaseTexturesDetour);
     }
 }

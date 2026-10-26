@@ -1,5 +1,6 @@
 #include "GetTextureBoundsFixHook.h"
 #include "Log.h"
+#include "GameAddr.h"
 
 namespace GetTextureBoundsFixHook
 {
@@ -12,19 +13,31 @@ namespace GetTextureBoundsFixHook
     //   0048F177  90      nop                     ; a3 < count 原本路徑不變
     //                                              （緊接的0x0048F178起
     //                                              redirect讀取完全不動）
-    static const DWORD kVA_Patch = 0x0048F175;
+    static DWORD g_vaPatch = 0;
     static const BYTE kExpected[3] = { 0x72, 0x01, 0xCC };
     static const BYTE kPatched[3]  = { 0x73, 0x10, 0x90 };
 
     void Install()
     {
-        BYTE* p = (BYTE*)kVA_Patch;
+        g_vaPatch = GameAddr::Addr(AddressTable::GetTextureBounds_BreakpointSite);
+        if (!g_vaPatch)
+        {
+            Log::Write("[GetTextureBoundsFixHook] 位址查詢失敗（版本不明或位址表缺項），放棄安裝");
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaPatch;
+        if (IsBadReadPtr(p, 3))
+        {
+            Log::Write("[GetTextureBoundsFixHook] 0x%08X無法讀取，放棄安裝", g_vaPatch);
+            return;
+        }
         for (int i = 0; i < 3; i++)
         {
             if (p[i] != kExpected[i])
             {
                 Log::Write("[GetTextureBoundsFixHook] 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝",
-                           kVA_Patch, i, p[i], kExpected[i]);
+                           g_vaPatch, i, p[i], kExpected[i]);
                 return;
             }
         }
@@ -37,6 +50,6 @@ namespace GetTextureBoundsFixHook
         VirtualProtect(p, 3, oldProt, &oldProt);
         FlushInstructionCache(GetCurrentProcess(), p, 3);
 
-        Log::Write("[GetTextureBoundsFixHook] sub_48F140越界subpage崩潰修法安裝完成：site=0x%08X（72 01 CC -> 73 10 90）", kVA_Patch);
+        Log::Write("[GetTextureBoundsFixHook] sub_48F140越界subpage崩潰修法安裝完成：site=0x%08X（72 01 CC -> 73 10 90）", g_vaPatch);
     }
 }

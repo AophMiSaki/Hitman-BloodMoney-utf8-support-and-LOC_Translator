@@ -1,6 +1,7 @@
 #include "SubtitleBriefSpeech.h"
 #include "Config.h"
 #include "Log.h"
+#include "GameAddr.h"
 
 namespace SubtitleBriefSpeech
 {
@@ -24,9 +25,12 @@ namespace SubtitleBriefSpeech
     // 事就是把傳入的ecx(this)整個蓋掉，原函式從來不用呼叫端傳進來的this——
     // 這裡記錄的ecx只是「呼叫端原本想傳的this」，供交叉核對呼叫端身分用，
     // 純觀察，patch完等價語意。
-    static const DWORD kVA_CreateChannelSite = 0x004EA670;
-    static const DWORD kVA_CreateChannelContinue = 0x004EA675;
+    static DWORD g_vaCreateChannelSite = 0;
+    static DWORD g_vaCreateChannelResume = 0;
+    static DWORD g_vaGameDataBase = 0;
+    // 第 1～4 byte 是 dword_820820（gameData base）的位址，隨版本不同；比對時略過，另外單獨驗證它等於表內的位址。
     static const BYTE kExpectedCreateChannel[5] = { 0xA1,0x20,0x08,0x82,0x00 };
+    static const GameAddr::Wild kCreateChannelWild[] = { { 1, 4 } };
 
     // ---- 用returnAddr判斷M00簡報字幕的真正觸發點 ----
     //
@@ -34,8 +38,8 @@ namespace SubtitleBriefSpeech
     // 訊號；sub_59FA90吃一個char* String2參數，經sub_4652C0/sub_464F10轉成
     // 音效資源才呼叫——只有這條路徑算「有文字內容的語音」，才是字幕觸發
     // 訊號。用returnAddr辨識：0x6849EA=sub_6849B0、0x59FAE0=sub_59FA90。
-    static const DWORD kVA_TrainingReturnAddr = 0x006849EA;
-    static const DWORD kVA_BriefingSpeakReturnAddr = 0x0059FAE0;
+    static DWORD g_vaTrainingReturnAddr = 0;
+    static DWORD g_vaBriefingSpeakReturnAddr = 0;
 
     // sub_6CEA40（全任務通用簡報旁白queue player，見
     // G:\bloodmoney\md\字幕功能.md）內部有兩處呼叫sub_4EA670建聲音channel：
@@ -53,8 +57,8 @@ namespace SubtitleBriefSpeech
     // sub_6CEA40跟sub_59FA90互斥（M00只走sub_59FA90、其他任務只走
     // sub_6CEA40），直接更新共用的g_speechEventId即可（曾拆獨立計數器，
     // 反而讓M00收不到任何line事件、字幕整個不顯示）。
-    static const DWORD kVA_NarratorFirstLineReturnAddr = 0x006CEA80;
-    static const DWORD kVA_NarratorNextLineReturnAddr = 0x006CEB27;
+    static DWORD g_vaNarratorFirstLineReturnAddr = 0;
+    static DWORD g_vaNarratorNextLineReturnAddr = 0;
 
     static void __cdecl OnCreateChannelEntry(DWORD callerThis, DWORD returnAddr, DWORD arg0, DWORD callerEsi)
     {
@@ -62,7 +66,7 @@ namespace SubtitleBriefSpeech
         // 舊版：每個sub_4EA670呼叫端都印（太吵，已停用）
         // Log::Write("[SubtitleBriefSpeech] sub_4EA670(建立聲音channel)被呼叫：returnAddr=0x%08X this=0x%08X arg0=0x%08X", returnAddr, callerThis, arg0);
 
-        if (returnAddr == kVA_BriefingSpeakReturnAddr)
+        if (returnAddr == g_vaBriefingSpeakReturnAddr)
         {
             g_speechEventId++;
             // 舊版：Log::Write("[SubtitleBriefSpeech] 判定：sub_59FA90(文字驅動語音)觸發建channel——採用為字幕t0錨點，eventId=%lu", g_speechEventId);
@@ -70,20 +74,20 @@ namespace SubtitleBriefSpeech
             if (g_speechEventId == 1)
                 Log::Write("[SubtitleBriefSpeech] sub_59FA90 句0 開始播放");
         }
-        else if (returnAddr == kVA_TrainingReturnAddr)
+        else if (returnAddr == g_vaTrainingReturnAddr)
         {
             // sub_6849B0(訓練提示音效，無文字內容)不當字幕訊號、不遞增 eventId，
             // 這裡純診斷標記——訓練關每個提示都會觸發、量大，綁 DebugSubtitleDiagEnable。
             if (g_diagEnable)
                 Log::Write("[SubtitleBriefSpeech] sub_6849B0被呼叫（訓練提示音效，不當字幕訊號）");
         }
-        else if (returnAddr == kVA_NarratorFirstLineReturnAddr || returnAddr == kVA_NarratorNextLineReturnAddr)
+        else if (returnAddr == g_vaNarratorFirstLineReturnAddr || returnAddr == g_vaNarratorNextLineReturnAddr)
         {
             int index = (int)*(const BYTE*)(callerEsi + 0x65);
             g_speechEventId++;
             // 舊版：Log::Write("[SubtitleBriefSpeech] 判定：sub_6CEA40(全任務通用簡報旁白)%s觸發建channel（narratorThis=0x%08X index=%d）——採用為字幕t0錨點，eventId=%lu", returnAddr == kVA_NarratorFirstLineReturnAddr ? "第一句" : "後續句", callerEsi, index, g_speechEventId);
             // 新版：只在句0(第一句)印一次，後續句不印
-            if (returnAddr == kVA_NarratorFirstLineReturnAddr)
+            if (returnAddr == g_vaNarratorFirstLineReturnAddr)
                 Log::Write("[SubtitleBriefSpeech] sub_6CEA40 句%d 開始播放", index);
         }
     }
@@ -111,22 +115,41 @@ namespace SubtitleBriefSpeech
             popad
             popfd
 
-            mov eax, dword ptr ds:[00820820h]
-            jmp kVA_CreateChannelContinue
+            mov eax, dword ptr [g_vaGameDataBase]
+            mov eax, dword ptr [eax]
+            jmp dword ptr [g_vaCreateChannelResume]
         }
     }
 
     static void InstallCreateChannelPatch()
     {
-        BYTE* p = (BYTE*)kVA_CreateChannelSite;
-        for (int i = 0; i < 5; i++)
+        g_vaCreateChannelSite = GameAddr::Addr(AddressTable::CreateChannel_Entry);
+        g_vaCreateChannelResume = GameAddr::Addr(AddressTable::CreateChannel_Resume);
+        g_vaGameDataBase = GameAddr::Addr(AddressTable::GameDataBase);
+        g_vaTrainingReturnAddr = GameAddr::Addr(AddressTable::TrainingPopupSound_CallerReturn);
+        g_vaBriefingSpeakReturnAddr = GameAddr::Addr(AddressTable::BriefingSpeak_CallerReturn);
+        g_vaNarratorFirstLineReturnAddr = GameAddr::Addr(AddressTable::NarratorFirstLine_CallerReturn);
+        g_vaNarratorNextLineReturnAddr = GameAddr::Addr(AddressTable::NarratorNextLine_CallerReturn);
+        if (!g_vaCreateChannelSite || !g_vaCreateChannelResume || !g_vaGameDataBase ||
+            !g_vaTrainingReturnAddr || !g_vaBriefingSpeakReturnAddr ||
+            !g_vaNarratorFirstLineReturnAddr || !g_vaNarratorNextLineReturnAddr)
         {
-            if (p[i] != kExpectedCreateChannel[i])
-            {
-                Log::Write("[SubtitleBriefSpeech] sub_4EA670 側錄hook安裝失敗："
-                           "0x%08X 第%d byte=0x%02X 預期0x%02X", kVA_CreateChannelSite, i, p[i], kExpectedCreateChannel[i]);
-                return;
-            }
+            Log::Write("[SubtitleBriefSpeech] sub_4EA670 側錄hook安裝失敗：位址查詢失敗"
+                       "（site=0x%08X resume=0x%08X gameData=0x%08X training=0x%08X briefing=0x%08X narrator1=0x%08X narrator2=0x%08X）",
+                       g_vaCreateChannelSite, g_vaCreateChannelResume, g_vaGameDataBase, g_vaTrainingReturnAddr,
+                       g_vaBriefingSpeakReturnAddr, g_vaNarratorFirstLineReturnAddr, g_vaNarratorNextLineReturnAddr);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaCreateChannelSite;
+        if (!GameAddr::MatchMasked(g_vaCreateChannelSite, kExpectedCreateChannel, 5, kCreateChannelWild, 1) ||
+            *(const DWORD*)(p + 1) != g_vaGameDataBase)
+        {
+            char hex[32];
+            GameAddr::HexAt(g_vaCreateChannelSite, 5, hex, sizeof(hex));
+            Log::Write("[SubtitleBriefSpeech] sub_4EA670 側錄hook安裝失敗：0x%08X 位元組不符：實際=%s預期=A1 <gameData位址0x%08X>",
+                       g_vaCreateChannelSite, hex, g_vaGameDataBase);
+            return;
         }
 
         DWORD oldProt = 0;
@@ -150,8 +173,8 @@ namespace SubtitleBriefSpeech
     // 插入點0x59FA90起6 bytes是單一完整指令(`sub esp, 204h`)，5-byte JMP
     // patch後補1個NOP。此時函式尚未執行任何指令，esp還沒被調整，
     // [esp]=return address、[esp+4]=String2(char*，非thiscall)。
-    static const DWORD kVA_BriefingSpeakEntrySite = 0x0059FA90;
-    static const DWORD kVA_BriefingSpeakEntryContinue = 0x0059FA96;
+    static DWORD g_vaBriefingSpeakEntrySite = 0;
+    static DWORD g_vaBriefingSpeakEntryResume = 0;
     static const BYTE kExpectedBriefingSpeakEntry[6] = { 0x81,0xEC,0x04,0x02,0x00,0x00 };
 
     static void __cdecl OnBriefingSpeakEntry(DWORD returnAddr, const char* string2)
@@ -181,19 +204,33 @@ namespace SubtitleBriefSpeech
             popfd
 
             sub esp, 204h
-            jmp kVA_BriefingSpeakEntryContinue
+            jmp dword ptr [g_vaBriefingSpeakEntryResume]
         }
     }
 
     static void InstallBriefingSpeakEntryPatch()
     {
-        BYTE* p = (BYTE*)kVA_BriefingSpeakEntrySite;
+        g_vaBriefingSpeakEntrySite = GameAddr::Addr(AddressTable::BriefingSpeak_Entry);
+        g_vaBriefingSpeakEntryResume = GameAddr::Addr(AddressTable::BriefingSpeak_Resume);
+        if (!g_vaBriefingSpeakEntrySite || !g_vaBriefingSpeakEntryResume)
+        {
+            Log::Write("[SubtitleBriefSpeech] sub_59FA90 側錄hook安裝失敗：位址查詢失敗（site=0x%08X resume=0x%08X）",
+                       g_vaBriefingSpeakEntrySite, g_vaBriefingSpeakEntryResume);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaBriefingSpeakEntrySite;
+        if (IsBadReadPtr(p, 6))
+        {
+            Log::Write("[SubtitleBriefSpeech] sub_59FA90 側錄hook安裝失敗：0x%08X 無法讀取", g_vaBriefingSpeakEntrySite);
+            return;
+        }
         for (int i = 0; i < 6; i++)
         {
             if (p[i] != kExpectedBriefingSpeakEntry[i])
             {
                 Log::Write("[SubtitleBriefSpeech] sub_59FA90 側錄hook安裝失敗："
-                           "0x%08X 第%d byte=0x%02X 預期0x%02X", kVA_BriefingSpeakEntrySite, i, p[i], kExpectedBriefingSpeakEntry[i]);
+                           "0x%08X 第%d byte=0x%02X 預期0x%02X", g_vaBriefingSpeakEntrySite, i, p[i], kExpectedBriefingSpeakEntry[i]);
                 return;
             }
         }

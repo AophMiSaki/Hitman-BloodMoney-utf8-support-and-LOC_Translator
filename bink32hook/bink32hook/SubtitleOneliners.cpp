@@ -1,6 +1,7 @@
 #include "SubtitleOneliners.h"
 #include "SubtitleGate.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include <Windows.h>
 #include <cstdio>
 #include <cstdint>
@@ -21,20 +22,29 @@ namespace SubtitleOneliners
     //
     // 0x6BACC0 起 5 bytes（`mov eax,dword_82083C` 剛好一條完整指令），5-byte
     // JMP patch 不需要補 NOP，續行點對齊到下一條指令 `sub esp,204h`。
-    static const DWORD kVA_FeignDeathEggSite = 0x006BACC0;
-    static const DWORD kVA_FeignDeathEggContinue = 0x006BACC5;
-    static const BYTE kExpectedFeignDeathEgg[5] = { 0xA1, 0x3C, 0x20, 0x82, 0x00 };
+    static DWORD g_vaFeignDeathEggSite = 0;
+    static DWORD g_vaFeignDeathEggResume = 0;
+    static DWORD g_vaLevelCtrlSingleton = 0;
+    // 錯誤修正：預期位元組原寫成 dword_82203C（A1 3C 20 82 00），與註解和實際指令的 dword_82083C 不符，
+    // 導致安裝前比對一律失敗、這個 hook 從未安裝。
+    // 第 1～4 byte 是 dword_82083C（LevelCtrl 單例）的位址，隨版本不同；比對時略過，另外單獨驗證它等於表內的單例位址。
+    static const BYTE kExpectedFeignDeathEgg[5] = { 0xA1, 0x3C, 0x08, 0x82, 0x00 };
+    static const GameAddr::Wild kFeignDeathEggWild[] = { { 1, 4 } };
 
     static const char* kFeignDeathEggLocKey = "M04/Oneliners/HMUsesFeignDeathWrong/M04_HMUFDW_01HM";
     static const char* kFeignDeathEggCategory = "HMUsesFeignDeathWrong";
 
     // thiscall sub_51D680(void* actorPtr) -> bool（只看 AL）。
     typedef char (__thiscall* CheckStillWaitingFn)(void* thisPtr);
-    static const CheckStillWaitingFn NativeCheckStillWaiting = (CheckStillWaitingFn)0x0051D680;
+    static char NativeCheckStillWaiting(void* thisPtr)
+    {
+        CheckStillWaitingFn fn = (CheckStillWaitingFn)GameAddr::Addr(AddressTable::CheckStillWaiting);
+        return fn ? fn(thisPtr) : 1;
+    }
 
     static void __cdecl OnFeignDeathEggEntry()
     {
-        DWORD base = *(const DWORD*)0x0082083C;
+        DWORD base = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!base) return;
         DWORD actorPtr = *(const DWORD*)(base + 0xA40);
         if (!actorPtr) return;
@@ -54,22 +64,33 @@ namespace SubtitleOneliners
             popad
             popfd
 
-            mov eax, dword ptr ds:[0082083Ch]
-            jmp kVA_FeignDeathEggContinue
+            mov eax, dword ptr [g_vaLevelCtrlSingleton]
+            mov eax, dword ptr [eax]
+            jmp dword ptr [g_vaFeignDeathEggResume]
         }
     }
 
     static void InstallFeignDeathEggHook()
     {
-        BYTE* p = (BYTE*)kVA_FeignDeathEggSite;
-        for (int i = 0; i < 5; i++)
+        g_vaFeignDeathEggSite = GameAddr::Addr(AddressTable::FeignDeathEgg_Site);
+        g_vaFeignDeathEggResume = GameAddr::Addr(AddressTable::FeignDeathEgg_Resume);
+        g_vaLevelCtrlSingleton = GameAddr::Addr(AddressTable::LevelCtrlSingleton);
+        if (!g_vaFeignDeathEggSite || !g_vaFeignDeathEggResume || !g_vaLevelCtrlSingleton)
         {
-            if (p[i] != kExpectedFeignDeathEgg[i])
-            {
-                Log::Write("[SubtitleOneliners] 0x%08X第%d byte是0x%02X，預期0x%02X"
-                           "——版本不符或已被其他patch動過，放棄安裝sub_6BACC0字幕補完hook", kVA_FeignDeathEggSite, i, p[i], kExpectedFeignDeathEgg[i]);
-                return;
-            }
+            Log::Write("[SubtitleOneliners] 位址查詢失敗（site=0x%08X resume=0x%08X levelCtrl=0x%08X），放棄安裝sub_6BACC0字幕補完hook",
+                       g_vaFeignDeathEggSite, g_vaFeignDeathEggResume, g_vaLevelCtrlSingleton);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaFeignDeathEggSite;
+        if (!GameAddr::MatchMasked(g_vaFeignDeathEggSite, kExpectedFeignDeathEgg, 5, kFeignDeathEggWild, 1) ||
+            *(const DWORD*)(p + 1) != g_vaLevelCtrlSingleton)
+        {
+            char hex[32];
+            GameAddr::HexAt(g_vaFeignDeathEggSite, 5, hex, sizeof(hex));
+            Log::Write("[SubtitleOneliners] 0x%08X位元組不符：實際=%s預期=A1 <單例位址0x%08X>"
+                       "——版本不符或已被其他patch動過，放棄安裝sub_6BACC0字幕補完hook", g_vaFeignDeathEggSite, hex, g_vaLevelCtrlSingleton);
+            return;
         }
 
         DWORD oldProt = 0;
@@ -80,7 +101,7 @@ namespace SubtitleOneliners
         FlushInstructionCache(GetCurrentProcess(), p, 5);
 
         Log::Write("[SubtitleOneliners] sub_6BACC0(M04詐死彩蛋台詞)字幕補完hook安裝完成：site=0x%08X detour=%p",
-                   kVA_FeignDeathEggSite, &Detour_FeignDeathEggEntry);
+                   g_vaFeignDeathEggSite, &Detour_FeignDeathEggEntry);
     }
 
     // ---- sub_6A4240：真正的 Oneliners（單人事件反應喊話，如警報/發現屍體/
@@ -98,8 +119,8 @@ namespace SubtitleOneliners
     // 0x6A4240 起 10 bytes（`mov eax,[esp+4]` 4 bytes ＋ `sub esp,204h` 6 bytes
     // 共兩條完整指令），5-byte JMP patch 後剩 5 bytes 補 NOP，續行點對齊到
     // 下一條指令(`push esi`)。
-    static const DWORD kVA_OnelinerSite = 0x006A4240;
-    static const DWORD kVA_OnelinerContinue = 0x006A424A;
+    static DWORD g_vaOnelinerSite = 0;
+    static DWORD g_vaOnelinerResume = 0;
     static const BYTE kExpectedOneliner[10] = { 0x8B, 0x44, 0x24, 0x04, 0x81, 0xEC, 0x04, 0x02, 0x00, 0x00 };
 
     // NPC/玩家距離過濾（SubtitleGate::IsNpcWithinHearRange 等，sub_6AACA0 跟
@@ -131,7 +152,7 @@ namespace SubtitleOneliners
         {
             mov eax, [esp+4]
             sub esp, 204h
-            jmp kVA_OnelinerContinue
+            jmp dword ptr [g_vaOnelinerResume]
         }
     }
 
@@ -170,13 +191,27 @@ namespace SubtitleOneliners
 
     static void InstallOnelinerHook()
     {
-        BYTE* p = (BYTE*)kVA_OnelinerSite;
+        g_vaOnelinerSite = GameAddr::Addr(AddressTable::Oneliners_Entry);
+        g_vaOnelinerResume = GameAddr::Addr(AddressTable::Oneliners_Resume);
+        if (!g_vaOnelinerSite || !g_vaOnelinerResume)
+        {
+            Log::Write("[SubtitleOneliners] 位址查詢失敗（site=0x%08X resume=0x%08X），放棄安裝sub_6A4240(Oneliners)字幕補完hook",
+                       g_vaOnelinerSite, g_vaOnelinerResume);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaOnelinerSite;
+        if (IsBadReadPtr(p, 10))
+        {
+            Log::Write("[SubtitleOneliners] 0x%08X無法讀取，放棄安裝sub_6A4240(Oneliners)字幕補完hook", g_vaOnelinerSite);
+            return;
+        }
         for (int i = 0; i < 10; i++)
         {
             if (p[i] != kExpectedOneliner[i])
             {
                 Log::Write("[SubtitleOneliners] 0x%08X第%d byte是0x%02X，預期0x%02X"
-                           "——版本不符或已被其他patch動過，放棄安裝sub_6A4240(Oneliners)字幕補完hook", kVA_OnelinerSite, i, p[i], kExpectedOneliner[i]);
+                           "——版本不符或已被其他patch動過，放棄安裝sub_6A4240(Oneliners)字幕補完hook", g_vaOnelinerSite, i, p[i], kExpectedOneliner[i]);
                 return;
             }
         }
@@ -196,7 +231,7 @@ namespace SubtitleOneliners
         Log::Write("[SubtitleOneliners] sub_6A4240(Oneliners)字幕補完hook安裝完成：site=0x%08X detour=%p"
                    "（成功時直接用完整LOC key字串當category+locKey交給SubtitleGate狀態機，"
                    "不影響原本語音播放邏輯）",
-                   kVA_OnelinerSite, &Detour_OnelinerEntry);
+                   g_vaOnelinerSite, &Detour_OnelinerEntry);
     }
 
     void Install()

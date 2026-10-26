@@ -44,7 +44,7 @@ namespace CrashHandler
         HANDLE hFile = CreateFileA(dumpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile != INVALID_HANDLE_VALUE)
         {
-            MINIDUMP_EXCEPTION_INFORMATION mei;
+            MINIDUMP_EXCEPTION_INFORMATION mei = {};
             mei.ThreadId = GetCurrentThreadId();
             mei.ExceptionPointers = ep;
             mei.ClientPointers = FALSE;

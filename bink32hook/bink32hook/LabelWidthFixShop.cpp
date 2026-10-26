@@ -1,5 +1,6 @@
 #include "LabelWidthFixShop.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include "Config.h"
 #include "GlyphAtlas.h"
 #include "FontCategory.h"
@@ -17,15 +18,16 @@ namespace LabelWidthFixShop
     // →lea ecx(outBuf)→push ecx→push edx([esi+0x84]=sourceWidget)，跟
     // Inventory Hook A/B同一種__stdcall(int,float*,int)呼叫慣例，detour
     // 進入點[esp+0/4/8]對應sourceWidget/outBuf/padding。
-    static const DWORD kSite = 0x0067E175;
+    static DWORD g_vaSite   = 0;
+    static DWORD g_vaResume = 0;
 
     typedef int (__stdcall *Fn_MeasureLabel)(int, float*, int);
-    static const Fn_MeasureLabel NativeMeasureLabel = (Fn_MeasureLabel)0x0055E550;
+    static Fn_MeasureLabel NativeMeasureLabel = nullptr;
 
     typedef int (__cdecl *Fn_HasChild)(int);
     typedef int (__thiscall *Fn_NextChild)(int);
-    static const Fn_HasChild  NativeHasChild  = (Fn_HasChild)0x004EB700;
-    static const Fn_NextChild NativeNextChild = (Fn_NextChild)0x00431E20;
+    static Fn_HasChild  NativeHasChild  = nullptr;
+    static Fn_NextChild NativeNextChild = nullptr;
 
     typedef DWORD (__thiscall *Fn_GetRttiTag)(void*);
     static DWORD GetRttiTag(void* obj)
@@ -34,9 +36,6 @@ namespace LabelWidthFixShop
         Fn_GetRttiTag fn = (Fn_GetRttiTag)(*(DWORD*)((BYTE*)vtbl + 0x34));
         return fn(obj);
     }
-
-    static const DWORD kRttiTagAddr  = 0x009A2B98;
-    static const DWORD kRttiMaskAddr = 0x009A2B9C;
 
     // native逐byte查vanilla西文字寬表，CJK固定被當成查無此字的窄佔位、每個
     // CJK視覺字元少算5px（原文模式下用來補回這個固定低估量）。
@@ -136,8 +135,8 @@ namespace LabelWidthFixShop
         float widgetOffset = ReadWidgetOffset(sourceWidget);
         float v5 = outBufAfterNative - widgetOffset - (float)padding;
 
-        DWORD rttiTag  = *(DWORD*)kRttiTagAddr;
-        DWORD rttiMask = *(DWORD*)kRttiMaskAddr;
+        DWORD rttiTag  = GameAddr::ReadDword(AddressTable::RttiTag);
+        DWORD rttiMask = GameAddr::ReadDword(AddressTable::RttiMask);
 
         int matchCount = 0;
         const char* firstCaption = nullptr;
@@ -212,23 +211,27 @@ namespace LabelWidthFixShop
 
             add esp, 12          ; 補清掉原本a1/a2/a3
 
-            mov eax, 0x0067E17A  ; kResume：原本call指令後面那條指令
-            jmp eax
+            jmp dword ptr [g_vaResume]  ; 原本call指令後面那條指令
         }
     }
 
-    static bool PatchSite(DWORD site, const BYTE expected[5], void* detour, const char* label)
+    // 原指令是 `E8 rel32`（call MeasureLabel）。rel32 隨版本不同，不逐 byte 比對，
+    // 改驗證 call 目標等於表內的 MeasureLabel。
+    static bool PatchSite(DWORD site, DWORD expectedTarget, void* detour, const char* label)
     {
         BYTE* p = (BYTE*)site;
-        for (int i = 0; i < 5; i++)
+        if (IsBadReadPtr(p, 5))
         {
-            if (p[i] != expected[i])
-            {
-                Log::Write("[LabelWidthFixShop] %s 0x%08X第%d byte是0x%02X，預期0x%02X"
-                           "——版本不符或已被其他patch動過，放棄安裝",
-                           label, site, i, p[i], expected[i]);
-                return false;
-            }
+            Log::Write("[LabelWidthFixShop] %s 0x%08X無法讀取，放棄安裝", label, site);
+            return false;
+        }
+        DWORD target = site + 5 + *(INT32*)(p + 1);
+        if (p[0] != 0xE8 || target != expectedTarget)
+        {
+            Log::Write("[LabelWidthFixShop] %s 0x%08X第0 byte=0x%02X call目標=0x%08X，預期E8且目標0x%08X"
+                       "——版本不符或已被其他patch動過，放棄安裝",
+                       label, site, p[0], target, expectedTarget);
+            return false;
         }
 
         DWORD oldProt = 0;
@@ -246,9 +249,22 @@ namespace LabelWidthFixShop
     {
         s_diagEnable = Config::LoadDebug(hModule).labelWidthFixDiagEnable;
 
-        static const BYTE kExpected[5] = { 0xE8, 0xD6, 0x03, 0xEE, 0xFF };
+        g_vaSite   = GameAddr::Addr(AddressTable::ShopPriceLabel_Site);
+        g_vaResume = GameAddr::Addr(AddressTable::ShopPriceLabel_Resume);
+        DWORD vaMeasure = GameAddr::Addr(AddressTable::MeasureLabel);
+        DWORD vaHas     = GameAddr::Addr(AddressTable::HasChild);
+        DWORD vaNext    = GameAddr::Addr(AddressTable::NextChild);
+        if (!g_vaSite || !g_vaResume || !vaMeasure || !vaHas || !vaNext)
+        {
+            Log::Write("[LabelWidthFixShop] 位址查詢失敗（site=0x%08X resume=0x%08X measure=0x%08X has=0x%08X next=0x%08X），放棄安裝",
+                       g_vaSite, g_vaResume, vaMeasure, vaHas, vaNext);
+            return false;
+        }
+        NativeMeasureLabel = (Fn_MeasureLabel)vaMeasure;
+        NativeHasChild     = (Fn_HasChild)vaHas;
+        NativeNextChild    = (Fn_NextChild)vaNext;
 
-        bool ok = PatchSite(kSite, kExpected, &Detour, "商店Price欄位(0x67E175)");
+        bool ok = PatchSite(g_vaSite, vaMeasure, &Detour, "商店Price欄位");
         return ok;
     }
 }

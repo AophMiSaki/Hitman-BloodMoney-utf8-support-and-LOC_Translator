@@ -1,5 +1,6 @@
 #include "AllocateSlotStaleRedirectFixHook.h"
 #include "Log.h"
+#include "GameAddr.h"
 
 namespace AllocateSlotStaleRedirectFixHook
 {
@@ -12,14 +13,14 @@ namespace AllocateSlotStaleRedirectFixHook
     // 偷開頭5 bytes(8B D0 6B D2 44)塞jmp，detour裡重跑這2句指令拿到
     // edx=idx*68、ecx=this，接著呼叫OnAllocateSlot檢查/清掉這格的+0x30，
     // 再jmp回0x0048F580讓原本「+0x2C=1;retn」照常執行。
-    static const DWORD kVA_Entry = 0x0048F57B;
-    static const DWORD kVA_ReturnTo = 0x0048F580;
+    static DWORD g_vaEntry = 0;
+    static DWORD g_vaResume = 0;
     static const BYTE kExpected[5] = { 0x8B, 0xD0, 0x6B, 0xD2, 0x44 };
 
     // sub_4466D0：native的釋放函式，__cdecl、單一參數(要釋放的指標)，呼叫端
     // 自己add esp,4清堆疊（見sub_48F190/sub_48F690既有呼叫方式）。
     typedef void (__cdecl* FreeFn)(void*);
-    static const DWORD kVA_Free = 0x004466D0;
+    static DWORD g_vaFree = 0;
 
     static DWORD g_clearedLogCount = 0;
 
@@ -33,7 +34,7 @@ namespace AllocateSlotStaleRedirectFixHook
         DWORD* redirectField = (DWORD*)(thisPtr + idxTimes68 + 4 + 0x30);
         if (*redirectField)
         {
-            FreeFn freeFn = (FreeFn)kVA_Free;
+            FreeFn freeFn = (FreeFn)g_vaFree;
             freeFn((void*)*redirectField);
             *redirectField = 0;
 
@@ -63,19 +64,34 @@ namespace AllocateSlotStaleRedirectFixHook
             add  esp, 8
             popad
 
-            jmp  kVA_ReturnTo
+            jmp  dword ptr [g_vaResume]
         }
     }
 
     void Install()
     {
-        BYTE* p = (BYTE*)kVA_Entry;
+        g_vaEntry = GameAddr::Addr(AddressTable::AllocateSlot_StaleClearSite);
+        g_vaResume = GameAddr::Addr(AddressTable::AllocateSlot_StaleClearResume);
+        g_vaFree = GameAddr::Addr(AddressTable::NativeFree);
+        if (!g_vaEntry || !g_vaResume || !g_vaFree)
+        {
+            Log::Write("[AllocateSlotStaleRedirectFixHook] 位址查詢失敗（entry=0x%08X resume=0x%08X free=0x%08X），放棄安裝",
+                       g_vaEntry, g_vaResume, g_vaFree);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaEntry;
+        if (IsBadReadPtr(p, 5))
+        {
+            Log::Write("[AllocateSlotStaleRedirectFixHook] 0x%08X無法讀取，放棄安裝", g_vaEntry);
+            return;
+        }
         for (int i = 0; i < 5; i++)
         {
             if (p[i] != kExpected[i])
             {
                 Log::Write("[AllocateSlotStaleRedirectFixHook] 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝",
-                           kVA_Entry, i, p[i], kExpected[i]);
+                           g_vaEntry, i, p[i], kExpected[i]);
                 return;
             }
         }
@@ -87,6 +103,6 @@ namespace AllocateSlotStaleRedirectFixHook
         VirtualProtect(p, 5, oldProt, &oldProt);
         FlushInstructionCache(GetCurrentProcess(), p, 5);
 
-        Log::Write("[AllocateSlotStaleRedirectFixHook] sub_48F560殘留+0x30清除hook安裝完成：site=0x%08X detour=%p", kVA_Entry, &AllocateSlotDetour);
+        Log::Write("[AllocateSlotStaleRedirectFixHook] sub_48F560殘留+0x30清除hook安裝完成：site=0x%08X detour=%p", g_vaEntry, &AllocateSlotDetour);
     }
 }

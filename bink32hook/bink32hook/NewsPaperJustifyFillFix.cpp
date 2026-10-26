@@ -1,14 +1,15 @@
 #include "NewsPaperJustifyFillFix.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include "ZipPathTrace.h"
 #include <cstring>
 
 namespace NewsPaperJustifyFillFix
 {
-    static const DWORD kSite = 0x55A22C;    // sub_559910內唯一一處呼叫sub_5586B0(<justify fill>撐開函式)的call
-    // sub_5586B0本體＝0x5586B0，回跳位址＝0x55A231。detour內這兩個位址用
-    // literal直接寫、不宣告成具名const，避免inline asm對具名const是否被當
-    // immediate展開的疑慮（比照NewsPaperImageLineHeightFix.cpp既有寫法）。
+    // sub_559910內唯一一處呼叫<justify fill>撐開函式的call、該函式本體、回跳位址。
+    static DWORD g_vaSite   = 0;
+    static DWORD g_vaResume = 0;
+    static DWORD g_vaTarget = 0;
 
     // 跟其他NewsPaper*Fix.cpp同一套判斷，這裡刻意不共用——修行為的hook各自
     // 獨立判斷，避免耦合（見[[feedback_verify_path_before_fix]]既有慣例）。
@@ -42,20 +43,22 @@ namespace NewsPaperJustifyFillFix
             jz   DoOriginal
 
             add  esp, 16                ; 報紙分類：跳過撐開呼叫，自行清掉4個已push參數，等同<justify left>
-            mov  eax, 0x55A231          ; kResume，用literal避免inline asm對具名const的解讀疑慮（比照既有NewsPaperImageLineHeightFix.cpp慣例）
-            jmp  eax
+            jmp  dword ptr [g_vaResume]
 
         DoOriginal:
-            mov  eax, 0x5586B0          ; kTarget＝sub_5586B0本體
-            call eax                    ; 非報紙分類：完全照native原本行為呼叫，callee自己清stack(retn 10h)
-            mov  eax, 0x55A231          ; kResume
-            jmp  eax
+            call dword ptr [g_vaTarget] ; 非報紙分類：完全照native原本行為呼叫，callee自己清stack(retn 10h)
+            jmp  dword ptr [g_vaResume]
         }
     }
 
     static bool PatchSite(DWORD site, const BYTE expected[5], void* detour, const char* label)
     {
         BYTE* p = (BYTE*)site;
+        if (IsBadReadPtr(p, 5))
+        {
+            Log::Write("[NewsPaperJustifyFillFix] %s 0x%08X無法讀取，放棄安裝", label, site);
+            return false;
+        }
         for (int i = 0; i < 5; i++)
         {
             if (p[i] != expected[i])
@@ -85,7 +88,17 @@ namespace NewsPaperJustifyFillFix
         // 原始byte＝call sub_5586B0的5-byte call rel32。
         static const BYTE kExpected[5] = { 0xE8, 0x7F, 0xE4, 0xFF, 0xFF };
 
-        bool ok = PatchSite(kSite, kExpected, &Detour_SkipJustifyFill, "報紙<justify fill>改跳過撐開(0x55A22C)");
+        g_vaSite   = GameAddr::Addr(AddressTable::NewsJustifyFill_Site);
+        g_vaResume = GameAddr::Addr(AddressTable::NewsJustifyFill_Resume);
+        g_vaTarget = GameAddr::Addr(AddressTable::HtmlJustifyFill);
+        if (!g_vaSite || !g_vaResume || !g_vaTarget)
+        {
+            Log::Write("[NewsPaperJustifyFillFix] 位址查詢失敗（site=0x%08X resume=0x%08X target=0x%08X），放棄安裝",
+                       g_vaSite, g_vaResume, g_vaTarget);
+            return false;
+        }
+
+        bool ok = PatchSite(g_vaSite, kExpected, &Detour_SkipJustifyFill, "報紙<justify fill>改跳過撐開");
         Log::Write("[NewsPaperJustifyFillFix] 安裝結果：%d", ok);
         return ok;
     }

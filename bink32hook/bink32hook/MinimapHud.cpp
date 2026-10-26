@@ -1,5 +1,6 @@
 #include "MinimapHud.h"
 #include "Config.h"
+#include "GameAddr.h"
 #include "Log.h"
 #include "Paths.h"
 #include "LocScenePath.h"
@@ -18,8 +19,7 @@ namespace MinimapHud
 {
     // native 全域關卡控制器單例 → +0xA40 = Hitman actor（可為 0）。只有進入
     // 關卡（actor 存在）時才畫，主選單/載入畫面不出現。
-    static const DWORD kLevelCtrlSingletonPtr = 0x0082083C;
-    static const DWORD kActorOffset           = 0xA40;
+    static const DWORD kActorOffset          = 0xA40;
 
     // [ctrl+0xA50] = menu/loading 控制器；其 +0x50 是一個 byte「暫停原因
     // bitfield」：bit 0x04 = ESC 暫停選單(IngameMenu)、
@@ -34,7 +34,10 @@ namespace MinimapHud
     // MinimapEngine.cpp 同一支，對 Hitman actor 可用（north-up 俯視丟 yaw，
     // 只用 X/Z，Y 拿來選樓層）。
     typedef void(__thiscall* EntityWorldPos_t)(void* entity, float* outVec3);
-    static const EntityWorldPos_t EntityWorldPos = (EntityWorldPos_t)0x004E68E0;
+    static EntityWorldPos_t GetEntityWorldPosFn()
+    {
+        return (EntityWorldPos_t)GameAddr::Addr(AddressTable::GetRootPoint);
+    }
 
     // ---- 顏色（ARGB）----
     static const DWORD kFillColor   = 0x66101418u;  // 半透明深底
@@ -105,7 +108,7 @@ namespace MinimapHud
 
     static bool InLevel()
     {
-        DWORD ctrl = *(DWORD*)kLevelCtrlSingletonPtr;
+        DWORD ctrl = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!ctrl) return false;
         return *(DWORD*)(ctrl + kActorOffset) != 0;
     }
@@ -115,18 +118,20 @@ namespace MinimapHud
 
     static bool PlayerWorldPos(float out[3])
     {
-        DWORD ctrl = *(DWORD*)kLevelCtrlSingletonPtr;
+        DWORD ctrl = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!ctrl) return false;
         DWORD actor = *(DWORD*)(ctrl + kActorOffset);
         if (!actor) return false;
         out[0] = out[1] = out[2] = 0.0f;
+        EntityWorldPos_t entityWorldPos = GetEntityWorldPosFn();
+        if (!entityWorldPos) return false;
         // 錯誤修正：關卡載入途中 actor 指標已非 0、但其 scene-graph 父鏈尚未
         // 接好，sub_4E68E0 沿父鏈累加座標時會讀到野指標而 AV。SEH 包住：
         // AV／分頁錯誤 → 當作這一幀取不到座標回 false（呼叫端據此略過選層／
         // 繪製）；guard page、堆疊溢位仍往上丟（見 SafeProbeFilter）。
         __try
         {
-            EntityWorldPos((void*)actor, out);
+            entityWorldPos((void*)actor, out);
         }
         __except (SafeProbeFilter(GetExceptionCode()))
         {
@@ -868,7 +873,7 @@ namespace MinimapHud
         if (!PlayerWorldPos(w)) return;
         if (w[0] == 0.0f && w[1] == 0.0f && w[2] == 0.0f) return;   // actor 未就緒，保留現況
 
-        DWORD ctrl  = *(DWORD*)kLevelCtrlSingletonPtr;
+        DWORD ctrl  = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         DWORD actor = ctrl ? *(DWORD*)(ctrl + kActorOffset) : 0;
 
         int candidate = SelectFloorByRoom(actor);          // 主：房名查表
@@ -893,7 +898,7 @@ namespace MinimapHud
         if (now - s_lastMs < 1000) return;
         s_lastMs = now;
 
-        DWORD ctrl = *(DWORD*)kLevelCtrlSingletonPtr;
+        DWORD ctrl = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!ctrl) return;
         DWORD actor = *(DWORD*)(ctrl + kActorOffset);
         if (!actor) return;
@@ -1124,7 +1129,7 @@ namespace MinimapHud
             SubtitleGate::IsKnownEndingCutsceneActive()) return false;
 
         // ESC 暫停選單 / 原生地圖畫面開啟中 → 不畫。
-        DWORD ctrl       = *(DWORD*)kLevelCtrlSingletonPtr;
+        DWORD ctrl       = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         DWORD menuCtrl   = ctrl     ? *(DWORD*)(ctrl + kMenuCtrlOffset)     : 0;
         BYTE  pauseFlags = menuCtrl ? *(BYTE*)(menuCtrl + kPauseByteOffset) : 0;
         if (pauseFlags & kPauseMaskHide) return false;

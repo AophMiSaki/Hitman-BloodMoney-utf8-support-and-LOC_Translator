@@ -1,6 +1,7 @@
 #include "SubtitleWalkie.h"
 #include "SubtitleGate.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include <Windows.h>
 #include <cstdint>
 #include <cstring>
@@ -16,13 +17,13 @@ namespace SubtitleWalkie
     // 0x6C0220 起 6 bytes 是 `mov eax, large fs:0`（64 A1 00 00 00 00，SEH
     // prologue 首指令），5-byte JMP patch＋1 NOP，續行 0x6C0226。detour 在 SEH
     // frame 建立前執行、只讀記憶體。
-    static const DWORD kVA_WalkieSite     = 0x006C0220;
-    static const DWORD kVA_WalkieContinue = 0x006C0226;
+    static DWORD g_vaWalkieSite   = 0;
+    static DWORD g_vaWalkieResume = 0;
     static const BYTE  kExpectedWalkie[6] = { 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00 };
 
     static DWORD PlayerActor()
     {
-        DWORD gameData = *(const DWORD*)0x0082083C;
+        DWORD gameData = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!gameData) return 0;
         return *(const DWORD*)(gameData + 0xA40);
     }
@@ -36,7 +37,7 @@ namespace SubtitleWalkie
         if (!locKey || !locKey[0]) return;
 
         // 重放 sub_6C0220 開頭三道唯讀 guard：任一不成立時原函式不播語音，不補字幕。
-        DWORD gameData = *(const DWORD*)0x00820820;
+        DWORD gameData = GameAddr::ReadDword(AddressTable::GameDataBase);
         if (!gameData) return;
         if (!*(const DWORD*)(gameData + 0xB0C)) return;
         if (!SubtitleGate::ResolveActorHandle(a5)) return;
@@ -94,20 +95,34 @@ namespace SubtitleWalkie
             popfd
 
             mov  eax, fs:[0]            ; 被覆蓋的原指令（mov eax, large fs:0）
-            jmp  kVA_WalkieContinue
+            jmp  dword ptr [g_vaWalkieResume]
         }
     }
 
     void Install()
     {
-        BYTE* p = (BYTE*)kVA_WalkieSite;
+        g_vaWalkieSite = GameAddr::Addr(AddressTable::Walkie_Entry);
+        g_vaWalkieResume = GameAddr::Addr(AddressTable::Walkie_Resume);
+        if (!g_vaWalkieSite || !g_vaWalkieResume)
+        {
+            Log::Write("[SubtitleWalkie] 位址查詢失敗（site=0x%08X resume=0x%08X），放棄安裝sub_6C0220(對講機)字幕補完hook",
+                       g_vaWalkieSite, g_vaWalkieResume);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaWalkieSite;
+        if (IsBadReadPtr(p, 6))
+        {
+            Log::Write("[SubtitleWalkie] 0x%08X無法讀取，放棄安裝sub_6C0220(對講機)字幕補完hook", g_vaWalkieSite);
+            return;
+        }
         for (int i = 0; i < 6; i++)
         {
             if (p[i] != kExpectedWalkie[i])
             {
                 Log::Write("[SubtitleWalkie] 0x%08X第%d byte是0x%02X，預期0x%02X"
                            "——版本不符或已被其他patch動過，放棄安裝sub_6C0220(對講機)字幕補完hook",
-                           kVA_WalkieSite, i, p[i], kExpectedWalkie[i]);
+                           g_vaWalkieSite, i, p[i], kExpectedWalkie[i]);
                 return;
             }
         }
@@ -122,6 +137,6 @@ namespace SubtitleWalkie
 
         Log::Write("[SubtitleWalkie] sub_6C0220(對講機傳輸)字幕補完hook安裝完成：site=0x%08X detour=%p"
                    "（不判斷距離；玩家＝直接收訊者補原聲版、否則補+R失真版，不影響原本語音播放邏輯）",
-                   kVA_WalkieSite, &Detour_WalkieEntry);
+                   g_vaWalkieSite, &Detour_WalkieEntry);
     }
 }

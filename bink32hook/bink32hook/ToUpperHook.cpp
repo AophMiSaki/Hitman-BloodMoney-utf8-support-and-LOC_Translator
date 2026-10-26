@@ -1,5 +1,6 @@
 #include "ToUpperHook.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include <cstring>
 
 namespace ToUpperHook
@@ -29,12 +30,12 @@ namespace ToUpperHook
     // <0x80時原樣重跑被覆蓋的兩句指令(lea ecx,[eax-0DFh] / cmp ecx,1Dh)
     // 後跳回原本的switch跳轉指令，不影響ASCII的轉大寫行為。覆蓋9 bytes
     //（5-byte jmp + 4 NOP）。
-    static const DWORD kVA_463D10_SwitchEntry = 0x00463D30;
-    static const DWORD kVA_463D10_NormalContinue = 0x00463D39; // "ja short def_463D42"起點
-    static const DWORD kVA_463D10_BypassTarget = 0x00463D54;   // case後方重新編碼步驟("push eax"起點)
-    static const BYTE kExpected463D10[9] = { 0x8D,0x88,0x21,0xFF,0xFF,0xFF, 0x83,0xF9,0x1D };
+    static DWORD g_vaSwitchSite = 0;
+    static DWORD g_vaSwitchResume = 0;  // "ja short def_463D42"起點
+    static DWORD g_vaSwitchBypass = 0;  // case後方重新編碼步驟("push eax"起點)
+    static const BYTE kExpectedSwitchSite[9] = { 0x8D,0x88,0x21,0xFF,0xFF,0xFF, 0x83,0xF9,0x1D };
 
-    static __declspec(naked) void Detour_463D10_SwitchEntry()
+    static __declspec(naked) void Detour_SwitchEntry()
     {
         __asm
         {
@@ -42,21 +43,36 @@ namespace ToUpperHook
             jae   bypass
             lea   ecx, [eax - 0DFh]
             cmp   ecx, 1Dh
-            jmp   kVA_463D10_NormalContinue
+            jmp   dword ptr [g_vaSwitchResume]
         bypass:
-            jmp   kVA_463D10_BypassTarget
+            jmp   dword ptr [g_vaSwitchBypass]
         }
     }
 
-    static void InstallSub463D10SwitchBypass()
+    static void InstallSwitchBypass()
     {
-        BYTE* p = (BYTE*)kVA_463D10_SwitchEntry;
+        g_vaSwitchSite = GameAddr::Addr(AddressTable::ToUpper_SwitchSite);
+        g_vaSwitchResume = GameAddr::Addr(AddressTable::ToUpper_SwitchResume);
+        g_vaSwitchBypass = GameAddr::Addr(AddressTable::ToUpper_SwitchBypass);
+        if (!g_vaSwitchSite || !g_vaSwitchResume || !g_vaSwitchBypass)
+        {
+            Log::Write("[ToUpperHook] sub_463D10 switch入口位址查詢失敗（site=0x%08X resume=0x%08X bypass=0x%08X），放棄安裝",
+                       g_vaSwitchSite, g_vaSwitchResume, g_vaSwitchBypass);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaSwitchSite;
+        if (IsBadReadPtr(p, 9))
+        {
+            Log::Write("[ToUpperHook] sub_463D10 0x%08X無法讀取，放棄安裝", g_vaSwitchSite);
+            return;
+        }
         for (int i = 0; i < 9; i++)
         {
-            if (p[i] != kExpected463D10[i])
+            if (p[i] != kExpectedSwitchSite[i])
             {
                 Log::Write("[ToUpperHook] sub_463D10 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝",
-                           kVA_463D10_SwitchEntry, i, p[i], kExpected463D10[i]);
+                           g_vaSwitchSite, i, p[i], kExpectedSwitchSite[i]);
                 return;
             }
         }
@@ -64,14 +80,14 @@ namespace ToUpperHook
         DWORD oldProt = 0;
         VirtualProtect(p, 9, PAGE_EXECUTE_READWRITE, &oldProt);
         p[0] = 0xE9;
-        *(INT32*)(p + 1) = (INT32)((DWORD)&Detour_463D10_SwitchEntry - (DWORD)(p + 5));
+        *(INT32*)(p + 1) = (INT32)((DWORD)&Detour_SwitchEntry - (DWORD)(p + 5));
         p[5] = p[6] = p[7] = p[8] = 0x90;
         VirtualProtect(p, 9, oldProt, &oldProt);
         FlushInstructionCache(GetCurrentProcess(), p, 9);
 
         Log::Write("[ToUpperHook] sub_463D10 switch分派入口inline hook安裝完成：site=0x%08X detour=%p"
                    "（修正[0xDF,0xFC]算術分支繞過toupper()的CJK亂碼bug）",
-                   kVA_463D10_SwitchEntry, &Detour_463D10_SwitchEntry);
+                   g_vaSwitchSite, &Detour_SwitchEntry);
     }
 
     // 標準IAT hook：改寫main exe匯入表裡指定匯入函式的指標，改成指向我們
@@ -116,24 +132,60 @@ namespace ToUpperHook
         return false;
     }
 
+    // 錯誤修正：Steam版殼重建了匯入表，PatchIat走DataDirectory[IMPORT]找不到MSVCR71.DLL!toupper。
+    // 改為直接改寫IAT槽位（位址來自AddressTable::ToUpperIatSlot）；槽位目前值必須等於
+    // MSVCR71.DLL實際匯出的toupper才寫入，否則不動並記錄兩個值。
+    static bool PatchIatSlot(DWORD slotVa, void* detour, void** origOut)
+    {
+        if (!slotVa || IsBadReadPtr((void*)slotVa, sizeof(DWORD)))
+        {
+            Log::Write("[ToUpperHook] toupper IAT槽位0x%08X無法讀取", slotVa);
+            return false;
+        }
+        HMODULE crt = GetModuleHandleA("MSVCR71.DLL");
+        DWORD real = crt ? (DWORD)GetProcAddress(crt, "toupper") : 0;
+        DWORD* slot = (DWORD*)slotVa;
+        if (!real || *slot != real)
+        {
+            Log::Write("[ToUpperHook] toupper IAT槽位0x%08X目前值0x%08X，MSVCR71.DLL!toupper=0x%08X（模組=%p），不相符，不改寫",
+                       slotVa, *slot, real, crt);
+            return false;
+        }
+        DWORD oldProt = 0;
+        VirtualProtect(slot, sizeof(DWORD), PAGE_READWRITE, &oldProt);
+        if (origOut) *origOut = (void*)(DWORD_PTR)*slot;
+        *slot = (DWORD)detour;
+        VirtualProtect(slot, sizeof(DWORD), oldProt, &oldProt);
+        return true;
+    }
+
     void Install(HMODULE hModule)
     {
+        if (!GameAddr::IsSupported())
+        {
+            Log::Write("[ToUpperHook] 遊戲版本不明，放棄安裝");
+            return;
+        }
+
         HMODULE exeModule = GetModuleHandleA(NULL);
 
         void* orig = nullptr;
-        if (PatchIat(exeModule, "MSVCR71.DLL", "toupper", (void*)&Hook_ToUpper, &orig))
+        bool iatOk = (GameAddr::GetBuild() == GameAddr::Steam)
+            ? PatchIatSlot(GameAddr::Addr(AddressTable::ToUpperIatSlot), (void*)&Hook_ToUpper, &orig)
+            : PatchIat(exeModule, "MSVCR71.DLL", "toupper", (void*)&Hook_ToUpper, &orig);
+        if (iatOk)
         {
             g_origToUpper = (ToUpperFn)orig;
             Log::Write("[ToUpperHook] toupper IAT hook安裝完成，orig=%p", orig);
         }
         else
         {
-            Log::Write("[ToUpperHook] toupper IAT hook安裝失敗（main exe匯入表找不到MSVCR71.DLL!toupper，"
-                       "按鈕/HUD CJK文字亂碼問題不會被修復）");
+            Log::Write("[ToUpperHook] toupper IAT hook安裝失敗（GOG版：main exe匯入表找不到MSVCR71.DLL!toupper；"
+                       "Steam版：IAT槽位值與MSVCR71.DLL!toupper不符，見上一行；按鈕/HUD CJK文字亂碼問題不會被修復）");
         }
 
         // IAT hook只涵蓋toupper()路徑，sub_463D10的[0xDF,0xFC]算術分支繞過
         // toupper()攔不到，需要另外inline hook。
-        InstallSub463D10SwitchBypass();
+        InstallSwitchBypass();
     }
 }

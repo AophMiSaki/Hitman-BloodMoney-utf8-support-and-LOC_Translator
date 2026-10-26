@@ -1,13 +1,17 @@
 #include "NewsPaperLineHeightFix.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include "ZipPathTrace.h"
 #include "GlyphHook.h"
 #include <cstring>
 
 namespace NewsPaperLineHeightFix
 {
-    static const DWORD kSiteA = 0x00559F10; // 讀var_998+0x11的第一處，回跳0x559F18
-    static const DWORD kSiteB = 0x00559FB2; // 第二處，回跳0x559FBA
+    // 讀var_998+0x11的兩處及其回跳位址。
+    static DWORD g_vaSiteA   = 0;
+    static DWORD g_vaResumeA = 0;
+    static DWORD g_vaSiteB   = 0;
+    static DWORD g_vaResumeB = 0;
 
     // 跟NewsPaperSpaceAdvanceFix.cpp同一套判斷，這裡刻意不共用——修行為的
     // hook各自獨立判斷，避免耦合。
@@ -73,8 +77,7 @@ namespace NewsPaperLineHeightFix
             movsx edx, byte ptr [ecx + 0x11]
 
         ResumeA:
-            mov  eax, 0x559F18
-            jmp  eax
+            jmp  dword ptr [g_vaResumeA]
         }
     }
 
@@ -110,14 +113,18 @@ namespace NewsPaperLineHeightFix
             movsx edx, byte ptr [ecx + 0x11]
 
         ResumeB:
-            mov  eax, 0x559FBA
-            jmp  eax
+            jmp  dword ptr [g_vaResumeB]
         }
     }
 
     static bool PatchSite(DWORD site, const BYTE expected[8], void* detour, const char* label)
     {
         BYTE* p = (BYTE*)site;
+        if (IsBadReadPtr(p, 8))
+        {
+            Log::Write("[NewsPaperLineHeightFix] %s 0x%08X無法讀取，放棄安裝", label, site);
+            return false;
+        }
         for (int i = 0; i < 8; i++)
         {
             if (p[i] != expected[i])
@@ -146,8 +153,21 @@ namespace NewsPaperLineHeightFix
         // 原始byte（兩處相同）。
         static const BYTE kExpected[8] = { 0x8B, 0x4C, 0x24, 0x48, 0x0F, 0xBE, 0x51, 0x11 };
 
-        bool okA = PatchSite(kSiteA, kExpected, &Detour_LineHeightA, "case10路徑v102更新點A(0x559F10)");
-        bool okB = PatchSite(kSiteB, kExpected, &Detour_LineHeightB, "case10路徑v102更新點B(0x559FB2)");
+        g_vaSiteA   = GameAddr::Addr(AddressTable::NewsLineHeight_SiteA);
+        g_vaResumeA = GameAddr::Addr(AddressTable::NewsLineHeight_ResumeA);
+        g_vaSiteB   = GameAddr::Addr(AddressTable::NewsLineHeight_SiteB);
+        g_vaResumeB = GameAddr::Addr(AddressTable::NewsLineHeight_ResumeB);
+
+        // 每個點的site與resume任一為0就放棄該點。
+        bool okA = false, okB = false;
+        if (g_vaSiteA && g_vaResumeA)
+            okA = PatchSite(g_vaSiteA, kExpected, &Detour_LineHeightA, "case10路徑v102更新點A");
+        else
+            Log::Write("[NewsPaperLineHeightFix] 點A位址查詢失敗（site=0x%08X resume=0x%08X），放棄安裝", g_vaSiteA, g_vaResumeA);
+        if (g_vaSiteB && g_vaResumeB)
+            okB = PatchSite(g_vaSiteB, kExpected, &Detour_LineHeightB, "case10路徑v102更新點B");
+        else
+            Log::Write("[NewsPaperLineHeightFix] 點B位址查詢失敗（site=0x%08X resume=0x%08X），放棄安裝", g_vaSiteB, g_vaResumeB);
         Log::Write("[NewsPaperLineHeightFix] 安裝結果：A=%d B=%d", okA, okB);
         return okA && okB;
     }

@@ -4,6 +4,7 @@
 #include "ZipPathTrace.h"
 #include "Config.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include <Windows.h>
 #include <map>
 #include <string>
@@ -25,8 +26,8 @@ namespace SubtitleTvRadio
     // sub_4C5E10→sub_4C5D00 把它複製進 sound 物件 +0x38/+0x3C/+0x40，呼叫者
     // sub_4EAA10 也對它做 sub_4E68E0 幾何轉換後餵給 3D 定位 slot 180——就是
     // native 拿來做距離衰減的座標。距離過濾用它（見 OnTvRadioPlay）。
-    static const DWORD kVA_Site     = 0x004C5E10;
-    static const DWORD kVA_Continue = 0x004C5E16;
+    static DWORD g_vaSite   = 0;
+    static DWORD g_vaResume = 0;
     static const BYTE  kExpected[6] = { 0x8B, 0x54, 0x24, 0x10, 0x8B, 0x01 };
 
     static bool  g_diag = false;
@@ -172,7 +173,7 @@ namespace SubtitleTvRadio
 
             mov  edx, [esp+10h]          ; 被覆蓋的原指令（6 bytes）
             mov  eax, [ecx]
-            jmp  kVA_Continue
+            jmp  dword ptr [g_vaResume]
         }
     }
 
@@ -188,7 +189,21 @@ namespace SubtitleTvRadio
             g_csInit = true;
         }
 
-        BYTE* p = (BYTE*)kVA_Site;
+        g_vaSite = GameAddr::Addr(AddressTable::TvRadioSubtitle_Entry);
+        g_vaResume = GameAddr::Addr(AddressTable::TvRadioSubtitle_Resume);
+        if (!g_vaSite || !g_vaResume)
+        {
+            Log::Write("[SubtitleTvRadio] 位址查詢失敗（site=0x%08X resume=0x%08X），放棄安裝 sub_4C5E10(電視/收音機廣播) 字幕補完hook",
+                       g_vaSite, g_vaResume);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaSite;
+        if (IsBadReadPtr(p, 6))
+        {
+            Log::Write("[SubtitleTvRadio] 0x%08X無法讀取，放棄安裝 sub_4C5E10(電視/收音機廣播) 字幕補完hook", g_vaSite);
+            return;
+        }
         for (int i = 0; i < 6; i++)
         {
             if (p[i] != kExpected[i])
@@ -196,7 +211,7 @@ namespace SubtitleTvRadio
                 Log::Write("[SubtitleTvRadio] 0x%08X第%d byte是0x%02X，預期0x%02X"
                            "——版本不符或已被其他 hook 佔用同一入口，"
                            "放棄安裝 sub_4C5E10(電視/收音機廣播) 字幕補完hook",
-                           kVA_Site, i, p[i], kExpected[i]);
+                           g_vaSite, i, p[i], kExpected[i]);
                 return;
             }
         }
@@ -212,6 +227,6 @@ namespace SubtitleTvRadio
         Log::Write("[SubtitleTvRadio] sub_4C5E10(電視/收音機廣播)字幕補完hook安裝完成：site=0x%08X detour=%p"
                    "（resId＝.SND offset，場景切換時 LocHook 掃 LOC TVAndRadio entry 建對照表，命中即交"
                    " SubtitleGate 狀態機；同 resId 冷卻 %lums，emitter 座標距離門檻 TvRadioHearRadius=%.1f）",
-                   kVA_Site, &Detour_TvRadioEntry, kCooldownMs, g_hearRadius);
+                   g_vaSite, &Detour_TvRadioEntry, kCooldownMs, g_hearRadius);
     }
 }

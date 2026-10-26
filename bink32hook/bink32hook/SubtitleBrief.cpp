@@ -1,6 +1,7 @@
 #include "SubtitleBrief.h"
 #include "Log.h"
 #include "Config.h"
+#include "GameAddr.h"
 #include "ZipPathTrace.h"
 #include "SubtitleBriefSpeech.h"
 #include "LocHook.h"
@@ -115,11 +116,12 @@ namespace SubtitleBrief
     // 服務singleton+傳入的index組key查詢），呼叫時this傳nullptr即可。
     // 查無資料回傳0，查到回傳文字指標。
     typedef const char* (__thiscall* GetBriefingLineFn)(void* thisPtr, int index);
-    static const GetBriefingLineFn NativeGetBriefingLine = (GetBriefingLineFn)0x006CF850;
 
     static bool TryGetNativeOriginalLine(int index, std::string& outText)
     {
-        const char* result = NativeGetBriefingLine(nullptr, index);
+        GetBriefingLineFn nativeGetBriefingLine = (GetBriefingLineFn)GameAddr::Addr(AddressTable::GetBriefingLine);
+        if (!nativeGetBriefingLine) return false;
+        const char* result = nativeGetBriefingLine(nullptr, index);
         if (!result) return false;
         outText = result;
         return true;

@@ -1,5 +1,6 @@
 #include "TrespassHud.h"
 #include "Config.h"
+#include "GameAddr.h"
 #include "Log.h"
 #include "WarningStrings.h"
 #include "SubtitleRender.h"
@@ -9,8 +10,7 @@
 namespace TrespassHud
 {
     // native 全域關卡控制器單例 → +0xA40 = Hitman actor（可為 0）。
-    static const DWORD kLevelCtrlSingletonPtr = 0x0082083C;
-    static const DWORD kActorOffset           = 0xA40;
+    static const DWORD kActorOffset          = 0xA40;
 
     // actor +0x0B7C：HUD 狀態旗標字，bit 27 = 擅闖（native 每幀重建）。
     static const DWORD kActorHudFlags   = 0x0B7C;
@@ -18,7 +18,10 @@ namespace TrespassHud
 
     // sub_5F29B0 = GetCurrentZoneKind()，__thiscall(actor) → ESecurityZone 整數值。
     typedef int(__thiscall* GetCurrentZoneKind_t)(void* actor);
-    static const GetCurrentZoneKind_t GetCurrentZoneKind = (GetCurrentZoneKind_t)0x005F29B0;
+    static GetCurrentZoneKind_t GetZoneKindFn()
+    {
+        return (GetCurrentZoneKind_t)GameAddr::Addr(AddressTable::GetCurrentZoneKind);
+    }
 
     enum WarnLevel { WARN_NONE = 0, WARN_TRESPASS, WARN_HOSTILE };
 
@@ -45,14 +48,16 @@ namespace TrespassHud
 
     static WarnLevel Evaluate()
     {
-        DWORD ctrl = *(DWORD*)kLevelCtrlSingletonPtr;
+        DWORD ctrl = GameAddr::ReadDword(AddressTable::LevelCtrlSingleton);
         if (!ctrl) return WARN_NONE;
         DWORD actor = *(DWORD*)(ctrl + kActorOffset);
         if (!actor) return WARN_NONE;
 
         if (!(*(DWORD*)(actor + kActorHudFlags) & kTrespassBit)) return WARN_NONE;
 
-        int zoneKind = GetCurrentZoneKind((void*)actor);
+        GetCurrentZoneKind_t zoneKindFn = GetZoneKindFn();
+        if (!zoneKindFn) return WARN_NONE;
+        int zoneKind = zoneKindFn((void*)actor);
         WarnLevel lv = ClassifyZone(zoneKind);
 
         if (g_diag)

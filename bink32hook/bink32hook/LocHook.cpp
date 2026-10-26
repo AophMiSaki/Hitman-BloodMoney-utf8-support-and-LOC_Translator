@@ -1,6 +1,7 @@
 #include "LocHook.h"
 #include "Config.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include "ZipPathTrace.h"
 #include "GlyphAtlas.h"
 #include "LocTxtParser.h"
@@ -176,11 +177,11 @@ namespace LocHook
 
         // parsed是LocTxtParser::Parse固定簽章的大小寫敏感std::map，跟
         // targetMap（CaseInsensitiveLess）型別不同不能直接swap，逐筆
-        // move進去（emplace在key只有大小寫差異時保留先插入那筆，這裡假設
+        // 放進去（key是const只能複製、value用move；emplace在key只有大小寫差異時保留先插入那筆，這裡假設
         // 翻譯txt不會刻意用大小寫區分出兩個不同entry，跟native自己
         // _strnicmp查找的語意一致）。
         targetMap.clear();
-        for (auto& kv : parsed) targetMap.emplace(std::move(kv.first), std::move(kv.second));
+        for (auto& kv : parsed) targetMap.emplace(kv.first, std::move(kv.second));
         Log::Write("[LocHook] %s格式場景文字檔載入完成：%s，%zu筆", formatLabel, path, targetMap.size());
         return true;
     }
@@ -413,7 +414,7 @@ namespace LocHook
     // 餵caption setter（vtable[0xB8]）。合成字串在雙表裡查不到 → 舊版回空字串
     // → caption畫不出來；且回傳的map內部指標壽命只到下次InvalidateCache，
     // widget卻留存並每幀重畫 → InvalidateCache後UAF。見md「原文譯文切換」第13節。
-    static const DWORD kReturnKeyOnMissReturnAddrs[] = { 0x0052AF61 };
+    static DWORD kReturnKeyOnMissReturnAddrs[] = { 0 };
 
     static bool IsReturnKeyOnMissCaller(DWORD retAddr)
     {
@@ -657,8 +658,8 @@ namespace LocHook
     //   465374  81 EC CC 00 00 00  sub esp, 0CCh
     // 進入時：ecx=this(DNameNode*)，[esp+4]=category，[esp+8]=key，函式尾端
     // retn 8，純thiscall+2個stack參數。10 bytes足夠塞5-byte jmp，剩5 bytes補NOP。
-    static const DWORD kVA_Entry = 0x00465370;
-    static const DWORD kVA_ReturnTo = 0x0046537A;
+    static DWORD g_vaEntry = 0;
+    static DWORD g_vaResumeTo = 0;
     static const BYTE kExpected[10] = { 0x8B, 0x54, 0x24, 0x04, 0x81, 0xEC, 0xCC, 0x00, 0x00, 0x00 };
 
     // ---- Path A/B/C上游呼叫端紀錄 ----
@@ -694,7 +695,7 @@ namespace LocHook
     // 前）——「回傳值被動作提示widget留存」型呼叫端，那批是「照常翻譯，但
     // 指標要永久＋miss回key不回空字串」，跟Path C的「絕不翻譯、強制
     // passthrough」不同。見md「原文譯文切換」第13節。
-    static const DWORD kPathCReturnAddrs[] = { 0x00675464, 0x006755B4, 0x00675F9D };
+    static DWORD kPathCReturnAddrs[] = { 0, 0, 0 };
 
     // ---- 存在性探測型呼叫端（回傳值只做strcmp、不顯示，強制passthrough）----
     //
@@ -711,7 +712,7 @@ namespace LocHook
     //     false、native不再補"_PC"，擾動它組教學slot key/id的字串。
     //     splash實際顯示文字改由SplashCaptionDetour（site 0x0067069C）處理，
     //     這筆探測交還native即可。見md「原文譯文切換」splash節。
-    static const DWORD kForcePassthroughReturnAddrs[] = { 0x006708E3 };
+    static DWORD kForcePassthroughReturnAddrs[] = { 0 };
 
     // __cdecl，供naked detour呼叫。偵測到Path C／存在性探測白名單內的呼叫端
     // 時回傳non-zero，detour據此強制passthrough——不管熱鍵是否為ON，一律回傳
@@ -789,7 +790,7 @@ namespace LocHook
         passthrough:
             mov  edx, [esp + 4]
             sub  esp, 0CCh
-            jmp  kVA_ReturnTo
+            jmp  dword ptr [g_vaResumeTo]
         }
     }
 
@@ -818,8 +819,8 @@ namespace LocHook
     // 固定 stack buffer）或 append 進區域 std::string，不留存我方指標；且
     // strlen(v27) >= 0x200 會觸發 __debugbreak()，ResolveSplashCaption 對逼近
     // 上限的譯文回 nullptr（退回英文、不覆寫）當保險。
-    static const DWORD kVA_SplashSite     = 0x0067069C;
-    static const DWORD kVA_SplashResumeTo = 0x006706A2;
+    static DWORD g_vaSplashSite     = 0;
+    static DWORD g_vaSplashResumeTo = 0;
     static const BYTE  kSplashExpected[6] = { 0x8A, 0x83, 0xF0, 0x3E, 0x00, 0x00 }; // mov al,[ebx+3EF0h]
 
     // __cdecl，供 SplashCaptionDetour 呼叫。src = sub_670630 第 8 參數（Src），
@@ -890,7 +891,7 @@ namespace LocHook
             pop  ecx
             pop  eax
             mov  al, [ebx + 3EF0h]       ; 被偷的原指令（ebx=this）
-            push 006706A2h               ; = kVA_SplashResumeTo；push/ret 跳回，不碰暫存器
+            push dword ptr [g_vaSplashResumeTo]  ; push/ret 跳回，不碰暫存器
             ret
         }
     }
@@ -907,13 +908,34 @@ namespace LocHook
         Config::HookToggleConfig toggles = Config::LoadHookToggle(hModule);
         LocNewspaperFix::Configure(toggles.newsPaperSoftBreakFix, Config::LoadNewsSoftBreakInterval(hModule));
 
-        BYTE* p = (BYTE*)kVA_Entry;
+        g_vaEntry = GameAddr::Addr(AddressTable::GetText_Entry);
+        g_vaResumeTo = GameAddr::Addr(AddressTable::GetText_Resume);
+        kReturnKeyOnMissReturnAddrs[0] = GameAddr::Addr(AddressTable::ActionWidgetRequery_CallerReturn);
+        kPathCReturnAddrs[0] = GameAddr::Addr(AddressTable::SaveFolderPath_CallerReturn);
+        kPathCReturnAddrs[1] = GameAddr::Addr(AddressTable::SaveFileName_CallerReturn);
+        kPathCReturnAddrs[2] = GameAddr::Addr(AddressTable::SaveFileNameAfterMission_CallerReturn);
+        kForcePassthroughReturnAddrs[0] = GameAddr::Addr(AddressTable::TutorialPageProbe_CallerReturn);
+        if (!g_vaEntry || !g_vaResumeTo || !kReturnKeyOnMissReturnAddrs[0] || !kPathCReturnAddrs[0] ||
+            !kPathCReturnAddrs[1] || !kPathCReturnAddrs[2] || !kForcePassthroughReturnAddrs[0])
+        {
+            Log::Write("[LocHook] 位址查詢失敗（entry=0x%08X resume=0x%08X actionWidget=0x%08X pathC=0x%08X/0x%08X/0x%08X probe=0x%08X），放棄安裝",
+                       g_vaEntry, g_vaResumeTo, kReturnKeyOnMissReturnAddrs[0], kPathCReturnAddrs[0],
+                       kPathCReturnAddrs[1], kPathCReturnAddrs[2], kForcePassthroughReturnAddrs[0]);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaEntry;
+        if (IsBadReadPtr(p, 10))
+        {
+            Log::Write("[LocHook] 0x%08X無法讀取，放棄安裝", g_vaEntry);
+            return;
+        }
         for (int i = 0; i < 10; i++)
         {
             if (p[i] != kExpected[i])
             {
                 Log::Write("[LocHook] 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝",
-                           kVA_Entry, i, p[i], kExpected[i]);
+                           g_vaEntry, i, p[i], kExpected[i]);
                 return;
             }
         }
@@ -927,18 +949,30 @@ namespace LocHook
         FlushInstructionCache(GetCurrentProcess(), p, 10);
 
         Log::Write("[LocHook] sub_465370(GetText slot0) entry hook安裝完成：site=0x%08X detour=%p enable=%d hotkeyVK=0x%02X",
-                   kVA_Entry, &GetTextDetour, g_enable, g_hotkeyVK);
+                   g_vaEntry, &GetTextDetour, g_enable, g_hotkeyVK);
 
         // sub_670630 splash caption 覆寫（獨立 site、獨立 byte 檢查，跟上面的
         // GetText entry hook 不互相依賴）。
-        BYTE* q = (BYTE*)kVA_SplashSite;
-        bool splashMatch = true;
-        for (int i = 0; i < 6; i++)
+        g_vaSplashSite = GameAddr::Addr(AddressTable::SplashCaption_Site);
+        g_vaSplashResumeTo = GameAddr::Addr(AddressTable::SplashCaption_Resume);
+        if (!g_vaSplashSite || !g_vaSplashResumeTo)
+        {
+            Log::Write("[LocHook] 位址查詢失敗（splash site=0x%08X resume=0x%08X），放棄安裝splash覆寫", g_vaSplashSite, g_vaSplashResumeTo);
+            return;
+        }
+
+        BYTE* q = (BYTE*)g_vaSplashSite;
+        bool splashMatch = !IsBadReadPtr(q, 6);
+        if (!splashMatch)
+        {
+            Log::Write("[LocHook] 0x%08X無法讀取，放棄安裝splash覆寫", g_vaSplashSite);
+        }
+        for (int i = 0; splashMatch && i < 6; i++)
         {
             if (q[i] != kSplashExpected[i])
             {
                 Log::Write("[LocHook] 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝splash覆寫",
-                           kVA_SplashSite, i, q[i], kSplashExpected[i]);
+                           g_vaSplashSite, i, q[i], kSplashExpected[i]);
                 splashMatch = false;
                 break;
             }
@@ -954,7 +988,7 @@ namespace LocHook
             FlushInstructionCache(GetCurrentProcess(), q, 6);
 
             Log::Write("[LocHook] sub_670630 splash caption 覆寫hook安裝完成：site=0x%08X detour=%p resumeTo=0x%08X",
-                       kVA_SplashSite, &SplashCaptionDetour, kVA_SplashResumeTo);
+                       g_vaSplashSite, &SplashCaptionDetour, g_vaSplashResumeTo);
         }
     }
 }

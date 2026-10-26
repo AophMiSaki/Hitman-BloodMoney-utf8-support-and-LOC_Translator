@@ -91,6 +91,7 @@
     <ClCompile Include="GlyphAtlas.cpp" />
     <ClCompile Include="GlyphHook.cpp" />
     <ClCompile Include="ZipPathTrace.cpp" />
+    <ClCompile Include="GameAddr.cpp" />
     <ClCompile Include="TexDispatchHook.cpp" />
     <ClCompile Include="TextureUpload.cpp" />
     <ClCompile Include="NativeTextureRegistry.cpp" />
@@ -134,6 +135,8 @@
     <ClInclude Include="GlyphHook.h" />
     <ClInclude Include="CJKRange.h" />
     <ClInclude Include="ZipPathTrace.h" />
+    <ClInclude Include="GameAddr.h" />
+    <ClInclude Include="AddressTable.h" />
     <ClInclude Include="TexDispatchHook.h" />
     <ClInclude Include="TextureUpload.h" />
     <ClInclude Include="NativeTextureRegistry.h" />

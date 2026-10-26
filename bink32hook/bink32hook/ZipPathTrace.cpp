@@ -1,5 +1,6 @@
 #include "ZipPathTrace.h"
 #include "Log.h"
+#include "GameAddr.h"
 #include "Config.h"
 #include <cstring>
 
@@ -10,11 +11,11 @@ namespace ZipPathTrace
     //   push 0FFFFFFFFh              ; 6A FF
     //   push offset SEH_441920       ; 68 BA AA 72 00 (=0x0072AABA)
     // 共7 bytes，足夠塞5-byte jmp，在這兩句上做patch。
-    static const DWORD kVA_Entry = 0x00441920;
-    // 回跳位址=kVA_Entry+7（前兩句原始指令的總長度），對應第三句指令
+    static DWORD g_vaEntry = 0;
+    // 回跳位址=入口+7（前兩句原始指令的總長度），對應第三句指令
     // mov eax, large fs:0 的起始位址。
-    static const DWORD kVA_ReturnTo = 0x00441927;
-    static const DWORD kSehHandler = 0x0072AABA;
+    static DWORD g_vaResume = 0;
+    static DWORD g_vaSehHandler = 0;
 
     static DWORD g_thisStash = 0;
     static DWORD g_nameStash = 0;
@@ -83,9 +84,9 @@ namespace ZipPathTrace
             ; 原樣重跑被覆蓋的前兩句指令，語意上跟完全沒被patch時一模一樣
             ; （純立即值push，不依賴進入時的暫存器/旗標狀態）。
             push 0FFFFFFFFh
-            push kSehHandler
+            push dword ptr [g_vaSehHandler]
 
-            mov  edx, kVA_ReturnTo
+            mov  edx, dword ptr [g_vaResume]
             jmp  edx
         }
     }
@@ -94,17 +95,29 @@ namespace ZipPathTrace
     {
         g_diagEnable = Config::LoadDebug(hModule).debugZipPathTrace;
 
-        BYTE* p = (BYTE*)kVA_Entry;
-        const BYTE kExpected[7] = { 0x6A, 0xFF, 0x68, 0xBA, 0xAA, 0x72, 0x00 };
-        for (int i = 0; i < 7; i++)
+        g_vaEntry = GameAddr::Addr(AddressTable::ZipPathTrace_Entry);
+        g_vaResume = GameAddr::Addr(AddressTable::ZipPathTrace_Resume);
+        g_vaSehHandler = GameAddr::Addr(AddressTable::ZipPathTrace_SehHandler);
+        if (!g_vaEntry || !g_vaResume || !g_vaSehHandler)
         {
-            if (p[i] != kExpected[i])
-            {
-                // 安裝失敗，不受g_diagEnable限制，一律印出。
-                Log::Write("[ZipPathTrace] 0x%08X第%d byte是0x%02X，預期0x%02X——版本不符或已被其他patch動過，放棄安裝",
-                           kVA_Entry, i, p[i], kExpected[i]);
-                return;
-            }
+            // 安裝失敗，不受g_diagEnable限制，一律印出。
+            Log::Write("[ZipPathTrace] 位址查詢失敗（entry=0x%08X resume=0x%08X seh=0x%08X），放棄安裝",
+                       g_vaEntry, g_vaResume, g_vaSehHandler);
+            return;
+        }
+
+        BYTE* p = (BYTE*)g_vaEntry;
+        // 第 3～6 byte 是 SEH handler 位址（push imm32），隨版本不同；比對時略過，另外單獨驗證它等於表內的位址。
+        const BYTE kExpected[7] = { 0x6A, 0xFF, 0x68, 0xBA, 0xAA, 0x72, 0x00 };
+        static const GameAddr::Wild kWild[] = { { 3, 4 } };
+        if (!GameAddr::MatchMasked(g_vaEntry, kExpected, 7, kWild, 1) || *(const DWORD*)(p + 3) != g_vaSehHandler)
+        {
+            // 安裝失敗，不受g_diagEnable限制，一律印出。
+            char hex[64];
+            GameAddr::HexAt(g_vaEntry, 7, hex, sizeof(hex));
+            Log::Write("[ZipPathTrace] 0x%08X位元組不符：實際=%s預期=6A FF 68 <SEH位址0x%08X> 00——版本不符或已被其他patch動過，放棄安裝",
+                       g_vaEntry, hex, g_vaSehHandler);
+            return;
         }
 
         DWORD oldProt = 0;
@@ -117,7 +130,7 @@ namespace ZipPathTrace
         FlushInstructionCache(GetCurrentProcess(), p, 7);
 
         // 安裝成功，不受g_diagEnable限制，一律印出。
-        Log::Write("[ZipPathTrace] sub_441920 entry hook安裝完成：site=0x%08X detour=%p", kVA_Entry, &ZipPathTraceDetour);
+        Log::Write("[ZipPathTrace] sub_441920 entry hook安裝完成：site=0x%08X detour=%p", g_vaEntry, &ZipPathTraceDetour);
     }
 
     const char* GetLastSceneZipPath()
