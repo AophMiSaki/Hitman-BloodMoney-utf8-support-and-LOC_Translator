@@ -10,6 +10,6 @@ https://archive.org/details/hbmprmloctool
 How to do:
 1. Unzip loc files from gen 2~4 Hitman games(2=73; 3=33; 4=54)
 2. Translate the loc file.
-3. For BloodMoney(2006), you need GOG version Main exe file.
+3. For BloodMoney(2006), now you can use it on GOG or steam version.(20261026 update)
 4. Put LOC files under bink32hook\Scenes\ , and change the font with iniedit tool.
 5. Done.
